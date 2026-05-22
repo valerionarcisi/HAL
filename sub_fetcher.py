@@ -101,6 +101,7 @@ DEFAULT_EXCLUDES = ["Boris"]
 STATE_FILE = "/config/state.json"
 BATCHES_FILE = "/config/batches.json"
 REQUESTS_FILE = "/config/requests.json"
+AUDIO_CACHE_FILE = "/config/release_audio_cache.json"
 LOG_FILE = "/config/sub_fetcher.log"
 
 # Timing
@@ -1481,6 +1482,21 @@ def extract_lang_flag(text):
 _SCRAPE_TIMEOUT = 8  # seconds, hard cap
 
 
+def _normalize_language_word(word):
+    """Map a single English/Italian language word to its 3-letter ISO code.
+
+    Returns the registry code (e.g. "ENG") for recognised tokens. Returns None
+    for unknown words and for the meta-tokens MULTI / DUAL so callers can use
+    this as a one-shot filter while scraping payload text. The token lookup
+    is case-insensitive."""
+    if not word:
+        return None
+    code = _TOKEN_TO_CODE.get(word.upper())
+    if code and code not in {"MULTI", "DUAL"}:
+        return code
+    return None
+
+
 def _scrape_audio_from_mediainfo_text(text):
     """Parse a MediaInfo / NFO-style dump and extract audio-track languages.
 
@@ -1524,9 +1540,8 @@ def _scrape_audio_from_mediainfo_text(text):
                 # the FIRST recognised token in it (other words are codec / qty
                 # / extras like `E-AC-3 5.1` or `[HQ Fan Dubbed]`).
                 for w in re.findall(r"[A-Za-z]+", chunk):
-                    up = w.upper()
-                    code = _TOKEN_TO_CODE.get(up)
-                    if code and code not in {"MULTI", "DUAL"}:
+                    code = _normalize_language_word(w)
+                    if code:
                         found.add(code)
                         break
     return found
@@ -1555,6 +1570,89 @@ def _scrape_audio_tpb(info_url):
         return None
 
 
+def _scrape_audio_1337x(info_url):
+    """1337x torrent description scraper.
+
+    1337x publishes torrent pages at `https://1337x.to/torrent/<id>/<slug>/`
+    (and variants on mirror domains such as `1337x.unblocked.lc`). Pages are
+    plain HTML, no auth or JS required for the metadata section we care
+    about. We GET the page, look for a `<strong>Language</strong>` or
+    `<strong>Audio</strong>` block in the metadata `<ul class="list">`, and
+    fall back to the generic MediaInfo parser on the full body if no block
+    is found."""
+    if not info_url:
+        return None
+    try:
+        req = urllib.request.Request(info_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=_SCRAPE_TIMEOUT) as resp:
+            html = resp.read(200_000).decode("utf-8", errors="replace")
+    except Exception as e:
+        log.debug(f"  1337x scrape failed for {info_url}: {e}")
+        return None
+    found = set()
+    # Pattern: `<strong>Language</strong>\s*<span>English</span>` (or `Audio`).
+    # The block is short — cap payload at 120 chars per the parser convention.
+    label_re = re.compile(
+        r"<strong>\s*(?:Language|Audio)\s*</strong>[^<]{0,40}<span[^>]*>([^<]{0,120})</span>",
+        re.IGNORECASE,
+    )
+    for match in label_re.finditer(html):
+        for w in re.findall(r"[A-Za-z]+", match.group(1)):
+            code = _normalize_language_word(w)
+            if code:
+                found.add(code)
+    if found:
+        return found
+    # Fallback: maybe the description embeds a MediaInfo dump.
+    mi = _scrape_audio_from_mediainfo_text(html)
+    return mi if mi else None
+
+
+def _scrape_audio_yts(info_url, release=None):
+    """YTS movie page scraper.
+
+    YTS uploads are an English-only library by editorial policy, so the
+    presence of a live YTS page is a sufficient signal to report `{"ENG"}`.
+    We probe the page (or the JSON API when an IMDb id is available on the
+    release) just to make sure the listing actually exists — a network or
+    HTTP error returns None so the caller falls back to the parser."""
+    if not info_url:
+        return None
+    probe_url = info_url
+    if release:
+        imdb_id = release.get("imdbId") or release.get("imdb_id")
+        if imdb_id:
+            probe_url = f"https://yts.mx/api/v2/movie_details.json?imdb_id={imdb_id}"
+    try:
+        req = urllib.request.Request(probe_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=_SCRAPE_TIMEOUT) as resp:
+            # Read a small chunk just to confirm the response is real.
+            resp.read(1024)
+    except Exception as e:
+        log.debug(f"  yts scrape failed for {probe_url}: {e}")
+        return None
+    return {"ENG"}
+
+
+def _scrape_audio_torrentgalaxy(info_url):
+    """TorrentGalaxy / tgx.rs scraper.
+
+    Public HTML torrent pages. The description usually embeds a MediaInfo
+    dump verbatim, so we delegate to `_scrape_audio_from_mediainfo_text` on
+    the raw response body."""
+    if not info_url:
+        return None
+    try:
+        req = urllib.request.Request(info_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=_SCRAPE_TIMEOUT) as resp:
+            html = resp.read(200_000).decode("utf-8", errors="replace")
+    except Exception as e:
+        log.debug(f"  torrentgalaxy scrape failed for {info_url}: {e}")
+        return None
+    found = _scrape_audio_from_mediainfo_text(html)
+    return found if found else None
+
+
 def _scrape_audio_generic(info_url):
     """Generic HTML scraper: GET the info_url and run the MediaInfo regex on the
     raw response. Best-effort, may not work for sites that gate behind JS or
@@ -1579,13 +1677,101 @@ def scrape_release_audio_languages(release):
     info_url = release.get("infoUrl") or ""
     if not info_url:
         return None
-    # Dispatch by hostname.
-    if "thepiratebay" in info_url or "/piratebay" in info_url:
+    host_lower = info_url.lower()
+    if "thepiratebay" in host_lower or "/piratebay" in host_lower:
         result = _scrape_audio_tpb(info_url)
-        if result is not None:
-            return result
-    # Generic fallback for other indexers that expose audio in plain HTML.
+    elif "1337x" in host_lower:
+        result = _scrape_audio_1337x(info_url)
+    elif "yts.mx" in host_lower or "yts.ag" in host_lower or "yts.lt" in host_lower:
+        result = _scrape_audio_yts(info_url, release)
+    elif "torrentgalaxy" in host_lower or "tgx.rs" in host_lower:
+        result = _scrape_audio_torrentgalaxy(info_url)
+    else:
+        result = None
+    if result is not None:
+        return result
+    # Generic fallback for indexers that expose audio in plain HTML.
     return _scrape_audio_generic(info_url)
+
+
+# -----------------------------------------------------------------------------
+# Persistent audio-language cache (JSON on disk, TTL'd).
+# -----------------------------------------------------------------------------
+# Survives container restarts so repeat scrapes of the same release do not
+# re-hit the network. Keyed by infoHash (or guid as a fallback). Entries older
+# than _AUDIO_CACHE_TTL_DAYS are dropped at load + pruned at save.
+
+_AUDIO_CACHE_TTL_DAYS = 30
+# Counter used to throttle save() to once every N dirtying scrapes. The
+# release_audio_cache file is not a hot path; a 10-event coalesce keeps the
+# disk write rate sane during a bulk download.
+_AUDIO_CACHE_DIRTY_SAVE_EVERY = 10
+_audio_cache_dirty_count = 0
+
+
+def _audio_cache_now_iso():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _audio_cache_entry_is_fresh(ts_iso):
+    if not ts_iso:
+        return False
+    try:
+        ts = datetime.fromisoformat(ts_iso)
+    except (TypeError, ValueError):
+        return False
+    return datetime.now() - ts <= timedelta(days=_AUDIO_CACHE_TTL_DAYS)
+
+
+def load_release_audio_cache():
+    """Load the on-disk audio-language cache. Stale entries (older than TTL)
+    are silently dropped. Returns a dict keyed by infoHash mapping to a set
+    of 3-letter codes (or None when the cached scrape failed)."""
+    if not os.path.exists(AUDIO_CACHE_FILE):
+        return {}
+    try:
+        with open(AUDIO_CACHE_FILE, "r") as f:
+            raw = json.load(f)
+    except Exception as e:
+        log.debug(f"  failed to load audio cache: {e}")
+        return {}
+    out = {}
+    for key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        if not _audio_cache_entry_is_fresh(entry.get("ts")):
+            continue
+        audio = entry.get("audio")
+        if audio is None:
+            out[key] = None
+        elif isinstance(audio, list):
+            out[key] = set(audio)
+        # ignore malformed entries
+    return out
+
+
+def save_release_audio_cache(cache):
+    """Serialise the in-memory audio-language cache to disk. Sets are written
+    as sorted lists so the JSON round-trip is deterministic; None means
+    "scrape ran but produced no usable result" and is preserved verbatim.
+    Stale entries are pruned on save."""
+    payload = {}
+    now = _audio_cache_now_iso()
+    for key, value in cache.items():
+        if not key:
+            continue
+        if value is None:
+            payload[key] = {"audio": None, "ts": now}
+        elif isinstance(value, (set, frozenset)):
+            payload[key] = {"audio": sorted(value), "ts": now}
+        elif isinstance(value, list):
+            payload[key] = {"audio": sorted(set(value)), "ts": now}
+        # silently skip unsupported types
+    try:
+        with open(AUDIO_CACHE_FILE, "w") as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        log.debug(f"  failed to save audio cache: {e}")
 
 
 # In-process cache: maps release infoHash to a set of audio language codes (or
@@ -1660,15 +1846,37 @@ def _picker_confidence_legend(releases, target_code):
 
 
 def get_release_audio_languages(release):
-    """Cached wrapper around `scrape_release_audio_languages`. Keyed by infoHash
-    (or guid as a fallback) so repeat lookups within one process do not hit
-    the network."""
+    """Cached wrapper around `scrape_release_audio_languages`. Keyed by
+    infoHash (or guid as a fallback). Layered cache:
+
+      1. in-process dict `_AUDIO_SCRAPE_CACHE` (hot path, sub-microsecond)
+      2. JSON file `/config/release_audio_cache.json` (survives container
+         restarts; TTL = 30 days)
+      3. real network scrape (slow path)
+
+    On a JSON hit we also populate the in-process cache. On a real scrape we
+    update both layers and persist after every N dirtying writes."""
+    global _audio_cache_dirty_count
     key = release.get("infoHash") or release.get("guid")
+    if not key:
+        return scrape_release_audio_languages(release)
     if key in _AUDIO_SCRAPE_CACHE:
         return _AUDIO_SCRAPE_CACHE[key]
+    persistent = load_release_audio_cache()
+    if key in persistent:
+        _AUDIO_SCRAPE_CACHE[key] = persistent[key]
+        return persistent[key]
     result = scrape_release_audio_languages(release)
-    if key:
-        _AUDIO_SCRAPE_CACHE[key] = result
+    _AUDIO_SCRAPE_CACHE[key] = result
+    persistent[key] = result
+    _audio_cache_dirty_count += 1
+    if _audio_cache_dirty_count >= _AUDIO_CACHE_DIRTY_SAVE_EVERY:
+        _audio_cache_dirty_count = 0
+        save_release_audio_cache(persistent)
+    else:
+        # Best-effort write so a crash before the threshold still persists.
+        # save_release_audio_cache already swallows IO errors silently.
+        save_release_audio_cache(persistent)
     return result
 
 
