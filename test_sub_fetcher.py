@@ -2892,3 +2892,291 @@ class TestFlagFormatting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# =============================================================================
+# Scraper expansion (1337x / YTS / TorrentGalaxy) — feature/scraper-expansion
+# =============================================================================
+
+
+class TestNormalizeLanguageWord(unittest.TestCase):
+    """The _normalize_language_word helper extracted from
+    _scrape_audio_from_mediainfo_text. Used by every scraper to filter MULTI /
+    DUAL noise out of token-by-token language extraction."""
+
+    def test_english_maps_to_eng(self):
+        self.assertEqual(sub_fetcher._normalize_language_word("English"), "ENG")
+
+    def test_lowercase_italian_maps_to_ita(self):
+        self.assertEqual(sub_fetcher._normalize_language_word("italian"), "ITA")
+
+    def test_multi_marker_is_filtered_out(self):
+        self.assertIsNone(sub_fetcher._normalize_language_word("MULTI"))
+
+    def test_dual_marker_is_filtered_out(self):
+        self.assertIsNone(sub_fetcher._normalize_language_word("DUAL"))
+
+    def test_unknown_word_returns_none(self):
+        self.assertIsNone(sub_fetcher._normalize_language_word("xyz"))
+
+    def test_empty_word_returns_none(self):
+        self.assertIsNone(sub_fetcher._normalize_language_word(""))
+        self.assertIsNone(sub_fetcher._normalize_language_word(None))
+
+
+class _MockResponse:
+    """urllib.request.urlopen-compatible context manager that returns canned
+    bytes."""
+
+    def __init__(self, body):
+        self._body = body if isinstance(body, (bytes, bytearray)) else body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            data = self._body
+            self._body = b""
+            return data
+        data = self._body[:n]
+        self._body = self._body[n:]
+        return data
+
+
+class TestScraperExpansion(unittest.TestCase):
+    """1337x / YTS / TorrentGalaxy scrapers + dispatcher routing."""
+
+    def setUp(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def tearDown(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    # ---------- 1337x ----------
+    def test_1337x_parses_language_block(self):
+        from unittest.mock import patch
+        html = (
+            "<html><body><ul class='list'>"
+            "<li><strong>Language</strong><span>English</span></li>"
+            "</ul></body></html>"
+        )
+        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse(html)):
+            found = sub_fetcher._scrape_audio_1337x("https://1337x.to/torrent/12345/movie-slug/")
+        self.assertEqual(found, {"ENG"})
+
+    def test_1337x_falls_back_to_mediainfo_when_no_block(self):
+        from unittest.mock import patch
+        html = "<html><body>\nAudio: Italian AC3 / English DTS\n</body></html>"
+        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse(html)):
+            found = sub_fetcher._scrape_audio_1337x("https://1337x.unblocked.lc/torrent/9/foo/")
+        self.assertEqual(found, {"ITA", "ENG"})
+
+    def test_1337x_network_error_returns_none(self):
+        from unittest.mock import patch
+        def boom(*a, **kw):
+            raise OSError("network down")
+        with patch.object(sub_fetcher.urllib.request, "urlopen", side_effect=boom):
+            self.assertIsNone(sub_fetcher._scrape_audio_1337x("https://1337x.to/torrent/1/x/"))
+
+    # ---------- YTS ----------
+    def test_yts_returns_eng_when_page_loads(self):
+        from unittest.mock import patch
+        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse("<html>ok</html>")):
+            found = sub_fetcher._scrape_audio_yts("https://yts.mx/movies/some-movie-2021", None)
+        self.assertEqual(found, {"ENG"})
+
+    def test_yts_uses_api_when_imdb_id_present(self):
+        from unittest.mock import patch
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            return _MockResponse(b'{"status":"ok"}')
+
+        with patch.object(sub_fetcher.urllib.request, "urlopen", side_effect=fake_urlopen):
+            found = sub_fetcher._scrape_audio_yts(
+                "https://yts.mx/movies/foo",
+                {"imdbId": "tt0111161"},
+            )
+        self.assertEqual(found, {"ENG"})
+        self.assertIn("api/v2/movie_details.json?imdb_id=tt0111161", captured["url"])
+
+    def test_yts_network_error_returns_none(self):
+        from unittest.mock import patch
+        def boom(*a, **kw):
+            raise OSError("nope")
+        with patch.object(sub_fetcher.urllib.request, "urlopen", side_effect=boom):
+            self.assertIsNone(sub_fetcher._scrape_audio_yts("https://yts.mx/movies/x", None))
+
+    # ---------- TorrentGalaxy ----------
+    def test_torrentgalaxy_parses_mediainfo_block(self):
+        from unittest.mock import patch
+        html = "<html><body><pre>\nAudio: French AC3 / German AC3 / English AAC\n</pre></body></html>"
+        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse(html)):
+            found = sub_fetcher._scrape_audio_torrentgalaxy("https://torrentgalaxy.to/torrent/77/abc/")
+        self.assertEqual(found, {"FRA", "GER", "ENG"})
+
+    def test_torrentgalaxy_no_mediainfo_returns_none(self):
+        from unittest.mock import patch
+        html = "<html><body>just a generic description</body></html>"
+        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse(html)):
+            self.assertIsNone(sub_fetcher._scrape_audio_torrentgalaxy("https://tgx.rs/torrent/1/y/"))
+
+    # ---------- Dispatcher routing ----------
+    def test_dispatcher_routes_to_tpb(self):
+        from unittest.mock import patch, MagicMock
+        rel = {"infoUrl": "https://thepiratebay.org/description.php?id=1"}
+        with patch.object(sub_fetcher, "_scrape_audio_tpb", return_value={"ITA"}) as m_tpb, \
+             patch.object(sub_fetcher, "_scrape_audio_1337x") as m_l3, \
+             patch.object(sub_fetcher, "_scrape_audio_yts") as m_yts, \
+             patch.object(sub_fetcher, "_scrape_audio_torrentgalaxy") as m_tgx, \
+             patch.object(sub_fetcher, "_scrape_audio_generic", return_value=None) as m_gen:
+            result = sub_fetcher.scrape_release_audio_languages(rel)
+        self.assertEqual(result, {"ITA"})
+        m_tpb.assert_called_once()
+        m_l3.assert_not_called()
+        m_yts.assert_not_called()
+        m_tgx.assert_not_called()
+        m_gen.assert_not_called()
+
+    def test_dispatcher_routes_to_1337x(self):
+        from unittest.mock import patch
+        rel = {"infoUrl": "https://1337x.to/torrent/9/abc/"}
+        with patch.object(sub_fetcher, "_scrape_audio_1337x", return_value={"ENG"}) as m:
+            result = sub_fetcher.scrape_release_audio_languages(rel)
+        self.assertEqual(result, {"ENG"})
+        m.assert_called_once()
+
+    def test_dispatcher_routes_to_yts(self):
+        from unittest.mock import patch
+        rel = {"infoUrl": "https://yts.mx/movies/foo-2020"}
+        with patch.object(sub_fetcher, "_scrape_audio_yts", return_value={"ENG"}) as m:
+            result = sub_fetcher.scrape_release_audio_languages(rel)
+        self.assertEqual(result, {"ENG"})
+        m.assert_called_once()
+
+    def test_dispatcher_routes_to_torrentgalaxy(self):
+        from unittest.mock import patch
+        rel = {"infoUrl": "https://torrentgalaxy.to/torrent/9/abc/"}
+        with patch.object(sub_fetcher, "_scrape_audio_torrentgalaxy", return_value={"FRA"}) as m:
+            result = sub_fetcher.scrape_release_audio_languages(rel)
+        self.assertEqual(result, {"FRA"})
+        m.assert_called_once()
+
+    def test_dispatcher_falls_back_to_generic_for_unknown_host(self):
+        from unittest.mock import patch
+        rel = {"infoUrl": "https://random-tracker.example/show/1"}
+        with patch.object(sub_fetcher, "_scrape_audio_generic", return_value={"ITA"}) as m:
+            result = sub_fetcher.scrape_release_audio_languages(rel)
+        self.assertEqual(result, {"ITA"})
+        m.assert_called_once()
+
+    def test_dispatcher_returns_none_when_generic_returns_none(self):
+        from unittest.mock import patch
+        rel = {"infoUrl": "https://random-tracker.example/show/1"}
+        with patch.object(sub_fetcher, "_scrape_audio_generic", return_value=None):
+            self.assertIsNone(sub_fetcher.scrape_release_audio_languages(rel))
+
+    def test_dispatcher_with_no_info_url_returns_none(self):
+        self.assertIsNone(sub_fetcher.scrape_release_audio_languages({"infoUrl": ""}))
+        self.assertIsNone(sub_fetcher.scrape_release_audio_languages({}))
+
+
+class TestPersistentAudioCache(unittest.TestCase):
+    """Verify the on-disk audio-language cache (JSON, 30-day TTL)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_file = sub_fetcher.AUDIO_CACHE_FILE
+        sub_fetcher.AUDIO_CACHE_FILE = os.path.join(self.tmpdir, "release_audio_cache.json")
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        sub_fetcher._audio_cache_dirty_count = 0
+
+    def tearDown(self):
+        sub_fetcher.AUDIO_CACHE_FILE = self._orig_file
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_roundtrip_preserves_sets_and_nones(self):
+        cache = {"h1": {"ITA", "ENG"}, "h2": None, "h3": set()}
+        sub_fetcher.save_release_audio_cache(cache)
+        loaded = sub_fetcher.load_release_audio_cache()
+        self.assertEqual(loaded.get("h1"), {"ITA", "ENG"})
+        self.assertIsNone(loaded.get("h2"))
+        # Empty set is preserved as empty set.
+        self.assertEqual(loaded.get("h3"), set())
+
+    def test_stale_entries_dropped_on_load(self):
+        # Hand-craft a file with one fresh and one ancient entry.
+        from datetime import datetime, timedelta
+        ancient = (datetime.now() - timedelta(days=60)).isoformat(timespec="seconds")
+        fresh = datetime.now().isoformat(timespec="seconds")
+        payload = {
+            "h_fresh": {"audio": ["ITA"], "ts": fresh},
+            "h_stale": {"audio": ["FRA"], "ts": ancient},
+        }
+        with open(sub_fetcher.AUDIO_CACHE_FILE, "w") as f:
+            json.dump(payload, f)
+        loaded = sub_fetcher.load_release_audio_cache()
+        self.assertIn("h_fresh", loaded)
+        self.assertNotIn("h_stale", loaded)
+
+    def test_load_missing_file_returns_empty(self):
+        self.assertEqual(sub_fetcher.load_release_audio_cache(), {})
+
+    def test_load_corrupt_file_returns_empty(self):
+        with open(sub_fetcher.AUDIO_CACHE_FILE, "w") as f:
+            f.write("this is not json")
+        self.assertEqual(sub_fetcher.load_release_audio_cache(), {})
+
+    def test_get_release_audio_languages_in_process_hit_skips_scrape(self):
+        from unittest.mock import patch
+        rel = {"infoHash": "h-hit"}
+        sub_fetcher._AUDIO_SCRAPE_CACHE["h-hit"] = {"ITA"}
+        with patch.object(sub_fetcher, "scrape_release_audio_languages") as m:
+            result = sub_fetcher.get_release_audio_languages(rel)
+        self.assertEqual(result, {"ITA"})
+        m.assert_not_called()
+
+    def test_get_release_audio_languages_persistent_hit_skips_scrape(self):
+        from unittest.mock import patch
+        rel = {"infoHash": "h-persist"}
+        sub_fetcher.save_release_audio_cache({"h-persist": {"ENG", "FRA"}})
+        with patch.object(sub_fetcher, "scrape_release_audio_languages") as m:
+            result = sub_fetcher.get_release_audio_languages(rel)
+        self.assertEqual(result, {"ENG", "FRA"})
+        m.assert_not_called()
+        # Persistent hit must populate the in-process layer too.
+        self.assertEqual(sub_fetcher._AUDIO_SCRAPE_CACHE.get("h-persist"), {"ENG", "FRA"})
+
+    def test_get_release_audio_languages_miss_calls_scrape_and_persists(self):
+        from unittest.mock import patch
+        rel = {"infoHash": "h-miss"}
+        with patch.object(sub_fetcher, "scrape_release_audio_languages", return_value={"ITA"}) as m:
+            result = sub_fetcher.get_release_audio_languages(rel)
+        self.assertEqual(result, {"ITA"})
+        m.assert_called_once()
+        # In-process layer populated.
+        self.assertEqual(sub_fetcher._AUDIO_SCRAPE_CACHE.get("h-miss"), {"ITA"})
+        # Persistent layer populated.
+        persisted = sub_fetcher.load_release_audio_cache()
+        self.assertEqual(persisted.get("h-miss"), {"ITA"})
+
+    def test_get_release_audio_languages_failure_persists_as_none(self):
+        from unittest.mock import patch
+        rel = {"infoHash": "h-fail"}
+        with patch.object(sub_fetcher, "scrape_release_audio_languages", return_value=None):
+            result = sub_fetcher.get_release_audio_languages(rel)
+        self.assertIsNone(result)
+        persisted = sub_fetcher.load_release_audio_cache()
+        self.assertIn("h-fail", persisted)
+        self.assertIsNone(persisted["h-fail"])
+
+    def test_save_swallows_io_errors(self):
+        # Point to an unwritable path; save() must not raise.
+        sub_fetcher.AUDIO_CACHE_FILE = "/this/path/does/not/exist/cache.json"
+        sub_fetcher.save_release_audio_cache({"h": {"ENG"}})  # no assertion: just must not raise
