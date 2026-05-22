@@ -2541,14 +2541,34 @@ class TestScoreWithScrape(unittest.TestCase):
         score = sub_fetcher.score_release_language_confidence(rel, "ITA")
         self.assertEqual(score, 1000)
 
-    def test_scrape_refutes_target_drops_to_none(self):
-        # Exact scenario from the screenshot: MULTi release that the parser
-        # would rate 400 (MULTI+ENG), but TPB descr says audio = ENG+FRA only.
+    def test_scrape_refutes_target_keeps_low_score(self):
+        # Gate-open policy: even when the scrape says the audio set is
+        # ENG+FRA (no ITA), the release is KEPT with the floor score so the
+        # user can override the scraper if they have ground-truth knowledge
+        # (sub track instead of audio, missing MediaInfo line, etc).
         rel = self._rel("Luca.2021.MULTi.1080p.WEB.H264-LOST")
         rel["languages"] = [{"id": 1, "name": "English"}]
         sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "FRA"}
         score = sub_fetcher.score_release_language_confidence(rel, "ITA")
-        self.assertIsNone(score)
+        self.assertEqual(score, sub_fetcher._SCRAPE_REFUTED_SCORE)
+
+    def test_scrape_confirms_target_on_single_lang_release(self):
+        # Even a pure ENG release (no MULTI/DUAL) gets promoted to 1000 when
+        # the scraper finds ITA in the audio track list.
+        rel = self._rel("Movie.ENG.1080p")
+        rel["languages"] = [{"id": 1, "name": "English"}]
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "ITA"}
+        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        self.assertEqual(score, 1000)
+
+    def test_scrape_refutes_single_lang_release_keeps_low_score(self):
+        # Pure ENG release with scrape confirming ENG-only: kept with floor
+        # so the user can still see it under the "refuted" marker.
+        rel = self._rel("Movie.ENG.1080p")
+        rel["languages"] = [{"id": 1, "name": "English"}]
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG"}
+        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        self.assertEqual(score, sub_fetcher._SCRAPE_REFUTED_SCORE)
 
     def test_scrape_empty_set_keeps_parser_score(self):
         # Empty set (cached as set()) means scrape ran but found no audio info.
@@ -2577,6 +2597,101 @@ class TestScoreWithScrape(unittest.TestCase):
         rel["languages"] = [{"id": 1, "name": "English"}]
         score = sub_fetcher.score_release_language_confidence(rel, "ITA", allow_scrape=False)
         self.assertEqual(score, 400)
+
+
+class TestConfidenceDescription(unittest.TestCase):
+    """Verify the Italian descriptions surfaced on the picker legend and the
+    confirm card."""
+
+    def setUp(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def tearDown(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def _rel(self, title, info_hash="h-desc"):
+        return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
+                "infoHash": info_hash}
+
+    def test_no_target_returns_empty_string(self):
+        rel = self._rel("Movie.MULTi.1080p")
+        self.assertEqual(sub_fetcher._confidence_description(rel, None), "")
+
+    def test_explicit_target_is_confirmed(self):
+        rel = self._rel("Movie.ITA.1080p")
+        desc = sub_fetcher._confidence_description(rel, "ITA")
+        self.assertIn("✅", desc)
+        self.assertIn("ITA", desc)
+
+    def test_scrape_confirms_target(self):
+        rel = self._rel("Movie.MULTi.1080p")
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
+        desc = sub_fetcher._confidence_description(rel, "ITA")
+        self.assertIn("✅", desc)
+        self.assertIn("scrape", desc.lower())
+
+    def test_scrape_refuted_returns_warning(self):
+        rel = self._rel("Movie.MULTi.1080p")
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "FRA"}
+        desc = sub_fetcher._confidence_description(rel, "ITA")
+        self.assertIn("🚫", desc)
+        self.assertIn("ENG", desc)
+        self.assertIn("FRA", desc)
+
+    def test_multi_alone_is_ambiguous(self):
+        rel = self._rel("Movie.MULTi.1080p")
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None  # no scrape result
+        desc = sub_fetcher._confidence_description(rel, "ITA")
+        self.assertIn("⚠️", desc)
+        self.assertIn("MULTI", desc)
+
+    def test_dual_with_other_is_uncertain(self):
+        rel = self._rel("Movie.DUAL.ENG.1080p")
+        rel["languages"] = [{"id": 1, "name": "English"}]
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None
+        desc = sub_fetcher._confidence_description(rel, "ITA")
+        self.assertIn("❓", desc)
+        self.assertIn("DUAL", desc)
+
+
+class TestPickerLegend(unittest.TestCase):
+    """Verify the emoji legend that appears above the release picker."""
+
+    def setUp(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def tearDown(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def _rel(self, title, info_hash):
+        return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
+                "infoHash": info_hash}
+
+    def test_no_legend_when_all_confirmed(self):
+        rels = [self._rel("Movie.ITA.1080p", "h1")]
+        self.assertEqual(sub_fetcher._picker_confidence_legend(rels, "ITA"), "")
+
+    def test_legend_with_warn_only(self):
+        rels = [self._rel("Movie.MULTi.1080p", "h2"),
+                self._rel("Movie.ITA.1080p", "h3")]
+        legend = sub_fetcher._picker_confidence_legend(rels, "ITA")
+        self.assertIn("⚠️", legend)
+        self.assertNotIn("❓", legend)
+        self.assertNotIn("🚫", legend)
+
+    def test_legend_with_all_markers(self):
+        # warn (MULTI alone) + question (DUAL+ENG) + block (scrape refute)
+        r_warn = self._rel("Movie.MULTi.1080p", "h-warn")
+        r_quest = self._rel("Movie.DUAL.ENG.1080p", "h-quest")
+        r_quest["languages"] = [{"id": 1, "name": "English"}]
+        r_block = self._rel("Movie.MULTi.1080p", "h-block")
+        sub_fetcher._AUDIO_SCRAPE_CACHE["h-block"] = {"ENG", "FRA"}
+        sub_fetcher._AUDIO_SCRAPE_CACHE["h-warn"] = None
+        sub_fetcher._AUDIO_SCRAPE_CACHE["h-quest"] = None
+        legend = sub_fetcher._picker_confidence_legend([r_warn, r_quest, r_block], "ITA")
+        self.assertIn("⚠️", legend)
+        self.assertIn("❓", legend)
+        self.assertIn("🚫", legend)
 
 
 class TestTpbScraperIdExtraction(unittest.TestCase):
