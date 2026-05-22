@@ -2383,6 +2383,52 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
         rels = [self._rel("Movie.2024.ENG.1080p"), self._rel("Movie.2024.FRA.1080p")]
         self.assertEqual(sub_fetcher.filter_releases_by_language(rels, "JPN"), [])
 
+    def test_marker_with_other_concrete_lang_is_rejected(self):
+        # Regression: target=ITA should NOT keep a release tagged DUAL+HIN or
+        # MULTI+ENG. The marker alone is ambiguous, but when paired with a
+        # disclosed non-target language the "other side" is already known and
+        # is not Italian, so the release cannot contain ITA.
+        rels = [
+            self._rel("Luca.2021.WEBRip.1080p.DUAL+HIN.x264"),
+            self._rel("Luca.2021.WEBRip.720p.DUAL+ENG.x264"),
+            self._rel("Luca.2021.WEBDL-1080p.ENG+MULTI.x264"),
+            self._rel("Luca.2021.WEBRip.1080p.ITA.x264"),
+            self._rel("Luca.2021.WEBRip.1080p.MULTi.x264"),
+        ]
+        kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
+        titles = [r["title"] for r in kept]
+        self.assertIn("Luca.2021.WEBRip.1080p.ITA.x264", titles)
+        # MULTI alone (no other concrete lang) → kept for post-grab verify
+        self.assertIn("Luca.2021.WEBRip.1080p.MULTi.x264", titles)
+        # Markers paired with non-target concrete langs → rejected
+        self.assertNotIn("Luca.2021.WEBRip.1080p.DUAL+HIN.x264", titles)
+        self.assertNotIn("Luca.2021.WEBRip.720p.DUAL+ENG.x264", titles)
+        self.assertNotIn("Luca.2021.WEBDL-1080p.ENG+MULTI.x264", titles)
+
+    def test_marker_with_target_explicit_is_kept(self):
+        # MULTI+ITA and DUAL+ITA: target is explicitly disclosed → keep.
+        rels = [
+            self._rel("Movie.2024.DUAL.ITA-ENG.1080p"),
+            self._rel("Movie.2024.MULTi-ITA.1080p"),
+        ]
+        kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
+        self.assertEqual(len(kept), 2)
+
+    def test_technical_tags_are_not_misdetected_as_languages(self):
+        # Regression: tokens like "BR", "BRRip", "PT", "NO", "DA", "RO",
+        # "EL" must NOT be mistaken for Portuguese/Norwegian/Danish/etc.
+        # Target ITA + a clean ITA-only release with technical/scene tags
+        # → only the ITA release passes (no false marker pass-through).
+        rels = [
+            self._rel("Movie.2024.BRRip.1080p.x264"),
+            self._rel("Movie.2024.BluRay.1080p.x264"),
+            self._rel("Movie.2024.WEBRip.NO-RETAG.1080p"),
+            self._rel("Movie.2024.ITA.BRRip.1080p"),
+        ]
+        kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
+        titles = [r["title"] for r in kept]
+        self.assertEqual(titles, ["Movie.2024.ITA.BRRip.1080p"])
+
 
 class TestTmdbOriginalLanguageByTmdbId(unittest.TestCase):
     """Verify the new TMDb helper returns the original_language field and
