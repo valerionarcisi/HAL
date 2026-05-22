@@ -2030,7 +2030,7 @@ class TestRadarrRequestsState(unittest.TestCase):
 
     def test_missing_file_returns_empty_pending(self):
         rs = sub_fetcher.load_requests()
-        self.assertEqual(rs, {"pending_radarr": {}})
+        self.assertEqual(rs, {"pending_radarr": {}, "pending_cerca": {}})
 
 
 class TestCommandDispatcher(unittest.TestCase):
@@ -3590,3 +3590,439 @@ class TestPersistentAudioCache(unittest.TestCase):
         # Point to an unwritable path; save() must not raise.
         sub_fetcher.AUDIO_CACHE_FILE = "/this/path/does/not/exist/cache.json"
         sub_fetcher.save_release_audio_cache({"h": {"ENG"}})  # no assertion: just must not raise
+
+
+# =============================================================================
+# /cerca — multi-source film download
+# =============================================================================
+
+class TestCercaQueryParsing(unittest.TestCase):
+    def test_title_only(self):
+        title, year = sub_fetcher._parse_cerca_query("Il Ciclone")
+        self.assertEqual(title, "Il Ciclone")
+        self.assertIsNone(year)
+
+    def test_title_with_trailing_year(self):
+        title, year = sub_fetcher._parse_cerca_query("Il Ciclone 1996")
+        self.assertEqual(title, "Il Ciclone")
+        self.assertEqual(year, 1996)
+
+    def test_title_with_paren_year(self):
+        title, year = sub_fetcher._parse_cerca_query("Il Ciclone (1996)")
+        self.assertEqual(title, "Il Ciclone")
+        self.assertEqual(year, 1996)
+
+    def test_empty_arg_returns_empty(self):
+        title, year = sub_fetcher._parse_cerca_query("")
+        self.assertEqual(title, "")
+        self.assertIsNone(year)
+
+    def test_three_digit_token_not_year(self):
+        title, year = sub_fetcher._parse_cerca_query("Movie 123")
+        self.assertEqual(title, "Movie 123")
+        self.assertIsNone(year)
+
+
+class TestSafeFilmDirname(unittest.TestCase):
+    def test_basic(self):
+        self.assertEqual(sub_fetcher._safe_film_dirname("Il Ciclone", 1996), "Il Ciclone (1996)")
+
+    def test_no_year(self):
+        self.assertEqual(sub_fetcher._safe_film_dirname("Foo", None), "Foo")
+
+    def test_strips_path_separators(self):
+        self.assertEqual(sub_fetcher._safe_film_dirname("Foo/Bar:Baz", 2020), "FooBarBaz (2020)")
+
+    def test_blank_falls_back(self):
+        self.assertEqual(sub_fetcher._safe_film_dirname("///", 2020), "Unknown (2020)")
+
+    def test_keeps_accents(self):
+        self.assertEqual(sub_fetcher._safe_film_dirname("Amélie", 2001), "Amélie (2001)")
+
+
+class TestParseDurationToSeconds(unittest.TestCase):
+    def test_int(self):
+        self.assertEqual(sub_fetcher._parse_duration_to_seconds(120), 120)
+
+    def test_string_digits(self):
+        self.assertEqual(sub_fetcher._parse_duration_to_seconds("90"), 90)
+
+    def test_mm_ss(self):
+        self.assertEqual(sub_fetcher._parse_duration_to_seconds("1:30"), 90)
+
+    def test_hh_mm_ss(self):
+        self.assertEqual(sub_fetcher._parse_duration_to_seconds("1:30:00"), 5400)
+
+    def test_invalid(self):
+        self.assertIsNone(sub_fetcher._parse_duration_to_seconds("nope"))
+
+
+class TestFormatDuration(unittest.TestCase):
+    def test_minutes(self):
+        self.assertEqual(sub_fetcher._format_duration(47 * 60), "47m")
+
+    def test_hours_and_minutes(self):
+        self.assertEqual(sub_fetcher._format_duration(95 * 60), "1h35m")
+
+    def test_exact_hours(self):
+        self.assertEqual(sub_fetcher._format_duration(2 * 3600), "2h")
+
+    def test_none(self):
+        self.assertEqual(sub_fetcher._format_duration(None), "?")
+
+
+class TestPickBestArchiveFile(unittest.TestCase):
+    def test_prefers_mp4_over_avi(self):
+        result = sub_fetcher._pick_best_archive_file([
+            {"name": "movie.avi", "size": "100"},
+            {"name": "movie.mp4", "size": "50"},
+        ])
+        self.assertEqual(result["name"], "movie.mp4")
+
+    def test_skips_trailer(self):
+        result = sub_fetcher._pick_best_archive_file([
+            {"name": "trailer.mp4", "size": "10"},
+            {"name": "main.mp4", "size": "100"},
+        ])
+        self.assertEqual(result["name"], "main.mp4")
+
+    def test_no_video_returns_none(self):
+        result = sub_fetcher._pick_best_archive_file([
+            {"name": "info.txt", "size": "5"},
+        ])
+        self.assertIsNone(result)
+
+    def test_empty_list_returns_none(self):
+        self.assertIsNone(sub_fetcher._pick_best_archive_file([]))
+
+
+class TestSearchArchiveOrg(unittest.TestCase):
+    """Mock urllib.request.urlopen at the function boundary via the `opener`
+    injection. Avoids the real network."""
+
+    def _make_opener(self, sequence):
+        """Return an opener callable that yields fake responses with the given
+        JSON payloads in order."""
+        from contextlib import contextmanager
+        responses = list(sequence)
+
+        @contextmanager
+        def fake(url, timeout=None):
+            class R:
+                def __init__(self, payload):
+                    self._payload = payload
+                def read(self):
+                    return json.dumps(self._payload).encode("utf-8")
+            payload = responses.pop(0)
+            yield R(payload)
+        return fake
+
+    def test_happy_path_filters_non_movies_and_returns_videos(self):
+        search_payload = {"response": {"docs": [
+            {"identifier": "movie1", "title": "Il Ciclone", "year": "1996",
+             "runtime": "1:35:00", "mediatype": "movies"},
+            {"identifier": "audio1", "title": "Audio Only", "year": "2000",
+             "mediatype": "audio"},
+            {"identifier": "movie2", "title": "Il Ciclone HD", "year": "1996",
+             "runtime": "95", "mediatype": "movies"},
+        ]}}
+        meta1 = {"files": [{"name": "ilciclone.mp4", "size": "500000000", "format": "h264"}]}
+        meta2 = {"files": [{"name": "ilciclone_hd.mkv", "size": "1500000000", "format": "h264"}]}
+        opener = self._make_opener([search_payload, meta1, meta2])
+        results = sub_fetcher.search_archive_org("Il Ciclone", year=1996, limit=10, opener=opener)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["identifier"], "movie1")
+        self.assertEqual(results[0]["source"], "archive")
+        self.assertEqual(results[0]["duration_sec"], 5700)
+        self.assertEqual(results[0]["file_name"], "ilciclone.mp4")
+
+    def test_no_results_returns_empty(self):
+        opener = self._make_opener([{"response": {"docs": []}}])
+        results = sub_fetcher.search_archive_org("Nonexistent Movie", opener=opener)
+        self.assertEqual(results, [])
+
+    def test_http_error_returns_empty(self):
+        def boom(url, timeout=None):
+            raise OSError("connection refused")
+        results = sub_fetcher.search_archive_org("Anything", opener=boom)
+        self.assertEqual(results, [])
+
+    def test_skips_items_without_video_files(self):
+        search_payload = {"response": {"docs": [
+            {"identifier": "no-video", "title": "Foo", "mediatype": "movies"},
+        ]}}
+        meta = {"files": [{"name": "readme.txt", "size": "100"}]}
+        opener = self._make_opener([search_payload, meta])
+        results = sub_fetcher.search_archive_org("Foo", opener=opener)
+        self.assertEqual(results, [])
+
+
+class TestSearchYoutube(unittest.TestCase):
+    def _make_runner(self, stdout="", stderr="", returncode=0, raises=None):
+        def runner(cmd, capture_output=True, text=True, timeout=None):
+            if raises is not None:
+                raise raises
+            class P:
+                pass
+            p = P()
+            p.stdout = stdout
+            p.stderr = stderr
+            p.returncode = returncode
+            return p
+        return runner
+
+    def test_parses_output(self):
+        stdout = (
+            "Pieraccioni film completo|abc123|5820|PiccolaTv\n"
+            "Il Ciclone parte 1|def456|5700|Mario\n"
+        )
+        runner = self._make_runner(stdout=stdout)
+        results = sub_fetcher.search_youtube("Il Ciclone Pieraccioni", limit=8, runner=runner)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["video_id"], "abc123")
+        self.assertEqual(results[0]["duration_sec"], 5820)
+        self.assertEqual(results[0]["uploader"], "PiccolaTv")
+        self.assertEqual(results[0]["source"], "youtube")
+        self.assertTrue(results[0]["url"].endswith("abc123"))
+
+    def test_yt_dlp_missing_returns_empty(self):
+        runner = self._make_runner(raises=FileNotFoundError())
+        results = sub_fetcher.search_youtube("anything", runner=runner)
+        self.assertEqual(results, [])
+
+    def test_filters_short_clips(self):
+        # 30 minutes — too short for a movie
+        stdout = "Clip|xxx|1800|chan\n"
+        runner = self._make_runner(stdout=stdout)
+        results = sub_fetcher.search_youtube("Foo", runner=runner)
+        self.assertEqual(results, [])
+
+    def test_filters_long_streams(self):
+        # 5 hours — too long
+        stdout = "Stream|xxx|18000|chan\n"
+        runner = self._make_runner(stdout=stdout)
+        results = sub_fetcher.search_youtube("Foo", runner=runner)
+        self.assertEqual(results, [])
+
+    def test_non_zero_returncode_returns_empty(self):
+        runner = self._make_runner(stdout="", stderr="boom", returncode=1)
+        results = sub_fetcher.search_youtube("Foo", runner=runner)
+        self.assertEqual(results, [])
+
+    def test_skips_lines_with_na_duration(self):
+        stdout = "X|abc|NA|chan\nValid|def|5700|chan2\n"
+        runner = self._make_runner(stdout=stdout)
+        results = sub_fetcher.search_youtube("Foo", runner=runner)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["video_id"], "def")
+
+
+class TestRemuxToMkv(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.src = os.path.join(self.tmpdir, "in.webm")
+        with open(self.src, "wb") as f:
+            f.write(b"fake webm bytes")
+        self.dest = os.path.join(self.tmpdir, "out.mkv")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_success_removes_source(self):
+        def runner(cmd, capture_output=True, text=True, timeout=None):
+            # ffmpeg success — write a fake dest file
+            with open(self.dest, "wb") as f:
+                f.write(b"fake mkv")
+            class P:
+                stdout = ""
+                stderr = ""
+                returncode = 0
+            return P()
+        path = sub_fetcher.remux_to_mkv(self.src, self.dest, runner=runner)
+        self.assertEqual(path, self.dest)
+        self.assertTrue(os.path.exists(self.dest))
+        self.assertFalse(os.path.exists(self.src))
+
+    def test_failure_raises_and_keeps_source(self):
+        def runner(cmd, capture_output=True, text=True, timeout=None):
+            class P:
+                stdout = ""
+                stderr = "ffmpeg boom"
+                returncode = 1
+            return P()
+        with self.assertRaises(sub_fetcher.CercaDownloadError):
+            sub_fetcher.remux_to_mkv(self.src, self.dest, runner=runner)
+        self.assertTrue(os.path.exists(self.src))
+
+    def test_missing_source_raises(self):
+        with self.assertRaises(sub_fetcher.CercaDownloadError):
+            sub_fetcher.remux_to_mkv(os.path.join(self.tmpdir, "ghost.webm"), self.dest)
+
+
+class TestInstallToLibrary(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.src = os.path.join(self.tmpdir, "movie.mkv")
+        with open(self.src, "wb") as f:
+            f.write(b"fake mkv")
+        self.library = os.path.join(self.tmpdir, "films")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_moves_file_and_creates_folder(self):
+        final = sub_fetcher.install_to_library(
+            self.src, "Il Ciclone", 1996, library_dir=self.library, radarr_scan=False,
+        )
+        self.assertTrue(os.path.exists(final))
+        self.assertFalse(os.path.exists(self.src))
+        self.assertIn("Il Ciclone (1996)", final)
+        self.assertTrue(final.endswith(".mkv"))
+
+    def test_calls_radarr_scan_when_enabled(self):
+        from unittest.mock import patch, MagicMock
+        with patch.object(sub_fetcher, "RadarrClient") as mock_cls:
+            client_instance = MagicMock()
+            mock_cls.return_value = client_instance
+            sub_fetcher.install_to_library(
+                self.src, "Il Ciclone", 1996, library_dir=self.library, radarr_scan=True,
+            )
+            client_instance.trigger_downloaded_movies_scan.assert_called_once()
+
+    def test_missing_source_raises(self):
+        with self.assertRaises(sub_fetcher.CercaDownloadError):
+            sub_fetcher.install_to_library(
+                "/nonexistent/file.mkv", "Foo", 2020, library_dir=self.library, radarr_scan=False,
+            )
+
+
+class TestCercaCommandDispatcher(unittest.TestCase):
+    def test_cerca_canonical_resolves(self):
+        spec = sub_fetcher._find_command("/cerca")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec["canonical"], "/cerca")
+
+    def test_cerca_aliases_resolve(self):
+        for alias in ["/search", "/find"]:
+            spec = sub_fetcher._find_command(alias)
+            self.assertIsNotNone(spec, f"alias {alias} should resolve to /cerca")
+            self.assertEqual(spec["canonical"], "/cerca")
+
+    def test_sub_canonical_resolves(self):
+        spec = sub_fetcher._find_command("/sub")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec["canonical"], "/sub")
+
+    def test_cmd_cerca_empty_arg_shows_usage(self):
+        from unittest.mock import patch
+        sent = []
+        with patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
+            sub_fetcher._cmd_cerca("", {}, set())
+        self.assertTrue(sent)
+        self.assertIn("Usa", sent[0][0])
+
+    def test_cmd_cerca_enqueues_search(self):
+        from unittest.mock import patch, MagicMock
+        with patch.object(sub_fetcher, "tg_send", return_value={"ok": True, "result": {"message_id": 42}}), \
+             patch.object(sub_fetcher, "download_queue") as mock_queue, \
+             patch.object(sub_fetcher, "queue_position", return_value=0):
+            sub_fetcher._cmd_cerca("Il Ciclone 1996", {}, set())
+            mock_queue.put.assert_called_once()
+            job = mock_queue.put.call_args[0][0]
+            self.assertEqual(job["type"], "cerca_search")
+            self.assertEqual(job["query"], "Il Ciclone 1996")
+            self.assertEqual(job["msg_id"], 42)
+
+
+class TestRenderCercaConfirm(unittest.TestCase):
+    """Verify the confirmation card renders correctly for both source kinds
+    and handles the session-expired case."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = sub_fetcher.REQUESTS_FILE
+        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+
+    def tearDown(self):
+        sub_fetcher.REQUESTS_FILE = self._orig
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_archive_result_renders_keyboard(self):
+        from unittest.mock import patch
+        rs = sub_fetcher.load_requests()
+        rs["pending_cerca"]["film:abc12345"] = {
+            "title": "Il Ciclone",
+            "year": 1996,
+            "results": [{
+                "source": "archive", "identifier": "ilciclone", "title": "Il Ciclone",
+                "year": 1996, "duration_sec": 5700, "size": 1024 * 1024 * 1024,
+                "file_name": "movie.mp4", "url": "https://archive.org/x", "uploader": None,
+            }],
+        }
+        sub_fetcher.save_requests(rs)
+        edits = []
+        with patch.object(sub_fetcher, "tg_edit_message",
+                          side_effect=lambda mid, body, reply_markup=None: edits.append((body, reply_markup))):
+            ok = sub_fetcher._render_cerca_confirm("abc12345", 0, progress_msg_id=10)
+        self.assertTrue(ok)
+        self.assertTrue(edits)
+        body, markup = edits[0]
+        self.assertIn("Il Ciclone", body)
+        self.assertIn("archive.org", body)
+        # Confirm + back + cancel
+        self.assertEqual(len(markup["inline_keyboard"]), 3)
+
+    def test_youtube_result_renders_with_low_quality_warning(self):
+        from unittest.mock import patch
+        rs = sub_fetcher.load_requests()
+        rs["pending_cerca"]["film:xyz98765"] = {
+            "title": "Il Ciclone",
+            "year": 1996,
+            "results": [{
+                "source": "youtube", "video_id": "abc", "title": "ciclone 480p",
+                "duration_sec": 5700, "uploader": "FilmTV",
+                "url": "https://www.youtube.com/watch?v=abc", "quality_hint": "480p",
+            }],
+        }
+        sub_fetcher.save_requests(rs)
+        edits = []
+        with patch.object(sub_fetcher, "tg_edit_message",
+                          side_effect=lambda mid, body, reply_markup=None: edits.append((body, reply_markup))):
+            ok = sub_fetcher._render_cerca_confirm("xyz98765", 0, progress_msg_id=10)
+        self.assertTrue(ok)
+        body, _ = edits[0]
+        self.assertIn("480p", body)
+        self.assertIn("bassa qualità", body)
+
+    def test_expired_session_returns_false(self):
+        from unittest.mock import patch
+        with patch.object(sub_fetcher, "tg_edit_message") as m:
+            ok = sub_fetcher._render_cerca_confirm("ghost00", 0, progress_msg_id=10)
+        self.assertFalse(ok)
+        m.assert_not_called()
+
+
+class TestFormatCercaButton(unittest.TestCase):
+    def test_archive_label(self):
+        label = sub_fetcher._format_cerca_button({
+            "source": "archive", "identifier": "movie1", "size": 1024 * 1024 * 1024,
+            "duration_sec": 5700,
+        })
+        self.assertIn("archive", label)
+        self.assertIn("1h35m", label)
+
+    def test_youtube_high_quality_label(self):
+        label = sub_fetcher._format_cerca_button({
+            "source": "youtube", "video_id": "abc", "title": "Il Ciclone 1080p",
+            "duration_sec": 5700, "quality_hint": "1080p",
+        })
+        self.assertIn("YouTube", label)
+        self.assertIn("1080p", label)
+        self.assertNotIn("⚠️", label)
+
+    def test_youtube_low_quality_gets_warning_marker(self):
+        label = sub_fetcher._format_cerca_button({
+            "source": "youtube", "video_id": "abc", "title": "Il Ciclone 480p",
+            "duration_sec": 5700, "quality_hint": "480p",
+        })
+        self.assertTrue(label.startswith("⚠️"))
