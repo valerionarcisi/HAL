@@ -2186,5 +2186,376 @@ class TestHtmlEntitiesUnescapedInTranslation(unittest.TestCase):
             sub_fetcher.CLAUDE_API_KEY = original_key
 
 
+class TestLanguageNormalization(unittest.TestCase):
+    """Verify two-letter / three-letter / full-name inputs all normalize to
+    the same canonical 3-letter ISO code from LANGUAGE_REGISTRY."""
+
+    def test_two_letter_lowercase(self):
+        self.assertEqual(sub_fetcher.normalize_lang_input("it"), "ITA")
+        self.assertEqual(sub_fetcher.normalize_lang_input("en"), "ENG")
+        self.assertEqual(sub_fetcher.normalize_lang_input("ja"), "JPN")
+
+    def test_two_letter_uppercase(self):
+        self.assertEqual(sub_fetcher.normalize_lang_input("IT"), "ITA")
+        self.assertEqual(sub_fetcher.normalize_lang_input("EN"), "ENG")
+        self.assertEqual(sub_fetcher.normalize_lang_input("DE"), "GER")
+
+    def test_three_letter(self):
+        self.assertEqual(sub_fetcher.normalize_lang_input("ita"), "ITA")
+        self.assertEqual(sub_fetcher.normalize_lang_input("JPN"), "JPN")
+        self.assertEqual(sub_fetcher.normalize_lang_input("kor"), "KOR")
+
+    def test_full_name(self):
+        self.assertEqual(sub_fetcher.normalize_lang_input("italian"), "ITA")
+        self.assertEqual(sub_fetcher.normalize_lang_input("Japanese"), "JPN")
+        self.assertEqual(sub_fetcher.normalize_lang_input("MANDARIN"), "CHI")
+
+    def test_unknown_returns_none(self):
+        self.assertIsNone(sub_fetcher.normalize_lang_input("klingon"))
+        self.assertIsNone(sub_fetcher.normalize_lang_input(""))
+        self.assertIsNone(sub_fetcher.normalize_lang_input(None))
+        # 4-letter code that is neither a token nor a registry key.
+        self.assertIsNone(sub_fetcher.normalize_lang_input("xxxx"))
+
+    def test_strips_punctuation(self):
+        # `--lang IT.` should still resolve once normalized.
+        self.assertEqual(sub_fetcher.normalize_lang_input("it."), "ITA")
+        self.assertEqual(sub_fetcher.normalize_lang_input(" en "), "ENG")
+
+
+class TestExtractLangFlag(unittest.TestCase):
+    """Parsing the `--lang CODE` flag out of free-text Telegram input."""
+
+    def test_no_flag_returns_query_unchanged(self):
+        cleaned, code, raw = sub_fetcher.extract_lang_flag("Punch-Drunk Love 2002")
+        self.assertEqual(cleaned, "Punch-Drunk Love 2002")
+        self.assertIsNone(code)
+        self.assertIsNone(raw)
+
+    def test_flag_trailing(self):
+        cleaned, code, raw = sub_fetcher.extract_lang_flag("Punch-Drunk Love --lang ITA")
+        self.assertEqual(cleaned, "Punch-Drunk Love")
+        self.assertEqual(code, "ITA")
+        self.assertEqual(raw, "ITA")
+
+    def test_flag_leading(self):
+        cleaned, code, _ = sub_fetcher.extract_lang_flag("--lang JPN Spirited Away")
+        self.assertEqual(cleaned, "Spirited Away")
+        self.assertEqual(code, "JPN")
+
+    def test_flag_middle(self):
+        cleaned, code, _ = sub_fetcher.extract_lang_flag("Spirited --lang JPN Away")
+        self.assertEqual(cleaned, "Spirited Away")
+        self.assertEqual(code, "JPN")
+
+    def test_flag_equals_form(self):
+        cleaned, code, _ = sub_fetcher.extract_lang_flag("Film --lang=fra")
+        self.assertEqual(cleaned, "Film")
+        self.assertEqual(code, "FRA")
+
+    def test_two_letter_input(self):
+        cleaned, code, raw = sub_fetcher.extract_lang_flag("Film --lang it")
+        self.assertEqual(cleaned, "Film")
+        self.assertEqual(code, "ITA")
+        self.assertEqual(raw, "it")
+
+    def test_unknown_lang_returns_raw(self):
+        cleaned, code, raw = sub_fetcher.extract_lang_flag("Film --lang klingon")
+        self.assertEqual(cleaned, "Film")
+        self.assertIsNone(code)
+        self.assertEqual(raw, "klingon")
+
+
+class TestDetectReleaseLanguagesRegistry(unittest.TestCase):
+    """Verify the extended LANGUAGE_REGISTRY recognizes the new languages and
+    rejects the documented false-positive substrings."""
+
+    def _detect(self, title, languages=None):
+        return sub_fetcher.detect_release_languages({
+            "title": title,
+            "languages": languages or [],
+        })
+
+    def test_italian_capitalized_token(self):
+        self.assertIn("ITA", self._detect("Punch-Drunk.Love.2002.iTALiAN.BDRip.1080p"))
+
+    def test_multi_release(self):
+        tags = self._detect("Spirited.Away.2001.MULTi.1080p.BluRay.x264-CMD")
+        self.assertIn("MULTI", tags)
+
+    def test_dual_audio_korean_english(self):
+        tags = self._detect("Parasite.2019.Dual.Audio.KOR-ENG.1080p")
+        self.assertIn("KOR", tags)
+        self.assertIn("ENG", tags)
+        self.assertIn("DUAL", tags)
+
+    def test_french(self):
+        self.assertIn("FRA", self._detect("Amelie.2001.FRENCH.1080p.x264"))
+
+    def test_japanese_two_letter(self):
+        self.assertIn("JPN", self._detect("Akira.1988.JP.1080p"))
+        self.assertIn("JPN", self._detect("Akira.1988.JA.1080p"))
+
+    def test_japanese_jap_token(self):
+        self.assertIn("JPN", self._detect("Akira.1988.JAP.1080p"))
+
+    def test_german(self):
+        self.assertIn("GER", self._detect("Run.Lola.Run.1998.GERMAN.x264"))
+        self.assertIn("GER", self._detect("Lola.1998.DEU.x264"))
+
+    def test_spanish(self):
+        self.assertIn("SPA", self._detect("Volver.2006.CASTELLANO.1080p"))
+
+    def test_chinese(self):
+        self.assertIn("CHI", self._detect("Hero.2002.MANDARIN.1080p"))
+        self.assertIn("CHI", self._detect("Hero.2002.ZH.1080p"))
+
+    def test_russian(self):
+        self.assertIn("RUS", self._detect("Stalker.1979.RU.x265"))
+
+    def test_composite_ita_eng(self):
+        tags = self._detect("Movie.2020.ITA-ENG.1080p")
+        self.assertIn("ITA", tags)
+        self.assertIn("ENG", tags)
+
+    def test_multi_ita_composite(self):
+        tags = self._detect("Movie.2020.MULTi-ITA.1080p")
+        self.assertIn("MULTI", tags)
+        self.assertIn("ITA", tags)
+
+    # False positives — `IT` substring inside common English words must NOT
+    # match, thanks to the word-boundary split in detect_release_languages.
+    def test_no_false_positive_it_in_hobbit(self):
+        self.assertNotIn("ITA", self._detect("The.Hobbit.2012.1080p.x265-GROUP"))
+
+    def test_no_false_positive_it_in_limit(self):
+        self.assertNotIn("ITA", self._detect("inception.2010.LIMITED.1080p"))
+
+    def test_no_false_positive_it_in_white(self):
+        self.assertNotIn("ITA", self._detect("Whiteout.2009.720p.BluRay"))
+
+    def test_no_false_positive_it_in_itunes(self):
+        self.assertNotIn("ITA", self._detect("iTunes.Rip.Title.2015"))
+
+    def test_structured_japanese_language_field(self):
+        tags = self._detect("Random.mkv", languages=[{"name": "Japanese"}])
+        self.assertIn("JPN", tags)
+
+
+class TestFilterReleasesByLanguage(unittest.TestCase):
+    """Verify the language pre-filter applied to the Radarr release list."""
+
+    def _rel(self, title, languages=None):
+        return {"title": title, "languages": languages or []}
+
+    def test_target_ita_keeps_only_matching_and_multi(self):
+        rels = [
+            self._rel("Movie.2024.ITA.1080p"),
+            self._rel("Movie.2024.ENG.1080p"),
+            self._rel("Movie.2024.MULTi.1080p"),
+        ]
+        kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
+        titles = [r["title"] for r in kept]
+        self.assertIn("Movie.2024.ITA.1080p", titles)
+        self.assertIn("Movie.2024.MULTi.1080p", titles)
+        self.assertNotIn("Movie.2024.ENG.1080p", titles)
+
+    def test_target_jpn_keeps_dual_audio(self):
+        # Three-release scenario: ENG-only (filtered out), JP+ENG dual (kept
+        # because it explicitly tags JP), and a generic MULTI release (kept
+        # via the multi pass-through).
+        rels = [
+            self._rel("Movie.2024.ENG.1080p"),
+            self._rel("Movie.2024.Dual.Audio.JP-EN.1080p"),
+            self._rel("Movie.2024.MULTi.1080p"),
+        ]
+        kept = sub_fetcher.filter_releases_by_language(rels, "JPN")
+        titles = [r["title"] for r in kept]
+        self.assertIn("Movie.2024.Dual.Audio.JP-EN.1080p", titles)
+        self.assertIn("Movie.2024.MULTi.1080p", titles)
+        self.assertNotIn("Movie.2024.ENG.1080p", titles)
+
+    def test_none_target_returns_input_unchanged(self):
+        rels = [self._rel("A.ENG"), self._rel("B.FRA")]
+        self.assertEqual(sub_fetcher.filter_releases_by_language(rels, None), rels)
+
+    def test_zero_matches_returns_empty(self):
+        rels = [self._rel("Movie.2024.ENG.1080p"), self._rel("Movie.2024.FRA.1080p")]
+        self.assertEqual(sub_fetcher.filter_releases_by_language(rels, "JPN"), [])
+
+
+class TestTmdbOriginalLanguageByTmdbId(unittest.TestCase):
+    """Verify the new TMDb helper returns the original_language field and
+    handles missing keys / unreachable network."""
+
+    def setUp(self):
+        self._orig_key = sub_fetcher.TMDB_API_KEY
+        sub_fetcher.TMDB_API_KEY = "fake-key"
+
+    def tearDown(self):
+        sub_fetcher.TMDB_API_KEY = self._orig_key
+
+    def test_returns_iso1_code(self):
+        from unittest.mock import patch, MagicMock
+        resp = MagicMock()
+        resp.read.return_value = json.dumps({"original_language": "ja"}).encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: None
+        with patch("urllib.request.urlopen", return_value=resp):
+            self.assertEqual(
+                sub_fetcher.tmdb_get_original_language_for_tmdb_id(12345),
+                "ja",
+            )
+
+    def test_none_without_api_key(self):
+        sub_fetcher.TMDB_API_KEY = ""
+        self.assertIsNone(sub_fetcher.tmdb_get_original_language_for_tmdb_id(12345))
+
+    def test_iso1_to_code_mapping(self):
+        self.assertEqual(sub_fetcher.tmdb_iso1_to_code("ja"), "JPN")
+        self.assertEqual(sub_fetcher.tmdb_iso1_to_code("it"), "ITA")
+        self.assertEqual(sub_fetcher.tmdb_iso1_to_code("en"), "ENG")
+        self.assertIsNone(sub_fetcher.tmdb_iso1_to_code("xx"))
+        self.assertIsNone(sub_fetcher.tmdb_iso1_to_code(None))
+
+
+class TestVerifyAudioLanguage(unittest.TestCase):
+    """Post-grab ffprobe-based verification of the downloaded file's audio
+    track against the user-requested language."""
+
+    def _mock_ffprobe(self, streams):
+        import subprocess
+        original_run = subprocess.run
+
+        def mock_run(*args, **kwargs):
+            return type("R", (), {
+                "returncode": 0,
+                "stdout": json.dumps({"streams": streams}),
+                "stderr": "",
+            })()
+
+        subprocess.run = mock_run
+        return original_run
+
+    def test_none_required_returns_true(self):
+        # `required_code=None` is the "no filter" sentinel; never inspects ffprobe.
+        self.assertTrue(sub_fetcher.verify_audio_language("/fake/video.mkv", None))
+
+    def test_ita_match_on_language_tag(self):
+        import subprocess
+        orig = self._mock_ffprobe([{"tags": {"language": "ita", "title": ""}}])
+        try:
+            self.assertTrue(sub_fetcher.verify_audio_language("/fake/video.mkv", "ITA"))
+        finally:
+            subprocess.run = orig
+
+    def test_ita_mismatch_when_only_english(self):
+        import subprocess
+        orig = self._mock_ffprobe([{"tags": {"language": "eng", "title": "English"}}])
+        try:
+            self.assertFalse(sub_fetcher.verify_audio_language("/fake/video.mkv", "ITA"))
+        finally:
+            subprocess.run = orig
+
+    def test_jpn_match_on_title_tag(self):
+        import subprocess
+        orig = self._mock_ffprobe([{"tags": {"language": "jpn", "title": "Japanese 5.1"}}])
+        try:
+            self.assertTrue(sub_fetcher.verify_audio_language("/fake/video.mkv", "JPN"))
+        finally:
+            subprocess.run = orig
+
+    def test_jpn_match_title_when_language_missing(self):
+        import subprocess
+        orig = self._mock_ffprobe([{"tags": {"title": "Japanese"}}])
+        try:
+            self.assertTrue(sub_fetcher.verify_audio_language("/fake/video.mkv", "JPN"))
+        finally:
+            subprocess.run = orig
+
+    def test_unknown_code_returns_false(self):
+        # Codes outside LANGUAGE_REGISTRY (e.g. accidentally passing "XX") must
+        # fail closed instead of crashing.
+        self.assertFalse(sub_fetcher.verify_audio_language("/fake/video.mkv", "XYZ"))
+
+    def test_ffprobe_missing_returns_false(self):
+        import subprocess
+        original_run = subprocess.run
+
+        def mock_run(*args, **kwargs):
+            raise FileNotFoundError("ffprobe not found")
+
+        subprocess.run = mock_run
+        try:
+            self.assertFalse(sub_fetcher.verify_audio_language("/fake/video.mkv", "ITA"))
+        finally:
+            subprocess.run = original_run
+
+
+class TestItaCommandAlias(unittest.TestCase):
+    """The /ita command must resolve, must be wired to the same handler chain
+    as /scarica with --lang ITA, and must appear in the help registry."""
+
+    def test_ita_resolves_in_command_registry(self):
+        spec = sub_fetcher._find_command("/ita")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec["canonical"], "/ita")
+
+    def test_ita_appears_in_did_you_mean(self):
+        # User mistypes "/itaa" -> suggestion should be "/ita".
+        self.assertEqual(sub_fetcher._suggest_command("/itaa"), "/ita")
+
+    def test_ita_enqueues_lang_ita_job(self):
+        # Tap into the download queue and assert the job pushed by /ita has
+        # the same shape /scarica would push with `--lang ITA`.
+        from unittest.mock import patch
+
+        captured = []
+
+        def fake_put(item, *args, **kwargs):
+            captured.append(item)
+
+        with patch.object(sub_fetcher.download_queue, "put", side_effect=fake_put), \
+                patch.object(sub_fetcher, "tg_send", return_value={"ok": True, "result": {"message_id": 1}}), \
+                patch.object(sub_fetcher, "queue_position", return_value=0):
+            # Force the Radarr-config gate to pass.
+            orig_url, orig_key = sub_fetcher.RADARR_URL, sub_fetcher.RADARR_API_KEY
+            sub_fetcher.RADARR_URL = "http://fake-radarr"
+            sub_fetcher.RADARR_API_KEY = "fake"
+            try:
+                sub_fetcher._cmd_ita("Punch-Drunk Love", state={}, excludes=[])
+            finally:
+                sub_fetcher.RADARR_URL = orig_url
+                sub_fetcher.RADARR_API_KEY = orig_key
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["type"], "scarica")
+        self.assertEqual(captured[0]["lang"], "ITA")
+        self.assertEqual(captured[0]["lang_source"], "explicit")
+        self.assertEqual(captured[0]["query"], "Punch-Drunk Love")
+
+
+class TestFlagFormatting(unittest.TestCase):
+    """Verify _flag_for emits the right flag for the extended registry."""
+
+    def test_ita_wins_when_mixed(self):
+        self.assertEqual(sub_fetcher._flag_for(["ITA", "ENG"]), "🇮🇹")
+
+    def test_jpn_solo(self):
+        self.assertEqual(sub_fetcher._flag_for(["JPN"]), "🇯🇵")
+
+    def test_kor_solo(self):
+        self.assertEqual(sub_fetcher._flag_for(["KOR"]), "🇰🇷")
+
+    def test_multi_marker(self):
+        self.assertEqual(sub_fetcher._flag_for(["MULTI"]), "🌐")
+
+    def test_dual_marker(self):
+        self.assertEqual(sub_fetcher._flag_for(["DUAL"]), "🎭")
+
+    def test_unknown(self):
+        self.assertEqual(sub_fetcher._flag_for(["?"]), "❔")
+
+
 if __name__ == "__main__":
     unittest.main()

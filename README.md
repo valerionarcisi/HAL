@@ -94,7 +94,8 @@ The canonical command names are in Italian (the bot speaks Italian), and each on
 | Command | Aliases | Description |
 |---|---|---|
 | `/cerca <name>` | `/search`, `/sub` | Search the library (or simply type the name without a slash) |
-| `/scarica <name [year]>` | `/download`, `/req` | Request a new film via Radarr — TMDb disambiguates, then you pick the release (quality, size, language, indexer) from an inline list |
+| `/scarica <name [year]> [--lang CODE]` | `/download`, `/req` | Request a new film via Radarr — TMDb disambiguates, then you pick the release (quality, size, language, indexer) from an inline list. Optional `--lang CODE` filters the release list (e.g. `/scarica Akira --lang JPN`, `/scarica Punch-Drunk Love --lang ITA`). Without `--lang`, defaults to the film's original language from TMDb. Codes: `ITA`, `ENG`, `JPN`, `KOR`, `FRA`, `GER`, `SPA`, `CHI`, `RUS` (2-letter `it`/`en`/`ja`/… and full names also work). Multi-track releases (`MULTI`, `Dual.Audio.JP-EN`) pass the filter and are verified post-grab via ffprobe. |
+| `/ita <name [year]>` | — | Shortcut for `/scarica ... --lang ITA`. |
 
 ### Sub management
 | Command | Aliases | Description |
