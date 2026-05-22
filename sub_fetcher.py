@@ -1594,6 +1594,71 @@ def scrape_release_audio_languages(release):
 _AUDIO_SCRAPE_CACHE = {}
 
 
+def _confidence_description(release, target_code):
+    """Italian-language description of how likely `release` contains audio in
+    `target_code`. Used in the confirmation card and the release picker
+    legend. Returns "" when no target is set."""
+    if not target_code:
+        return ""
+    flag = LANGUAGE_REGISTRY.get(target_code, {}).get("flag", "")
+    target_label = f"{flag} {target_code}".strip()
+    score = score_release_language_confidence(release, target_code)
+    scraped = None
+    if score is not None:
+        scraped = get_release_audio_languages(release)
+    if score is None:
+        return f"❌ Audio {target_label}: improbabile (nessun indizio)"
+    if score == 1000:
+        if scraped and target_code in scraped:
+            scraped_str = "+".join(sorted(scraped))
+            return f"✅ Audio {target_label}: confermato dallo scrape (tracce: {scraped_str})"
+        return f"✅ Audio {target_label}: presente nel nome del rilascio"
+    if score == _SCRAPE_REFUTED_SCORE:
+        scraped_str = "+".join(sorted(scraped)) if scraped else "?"
+        return (
+            f"🚫 Audio {target_label}: lo scrape ha trovato solo {scraped_str}, "
+            f"probabilmente non presente. Potresti procedere comunque se sai che "
+            f"il dato dello scrape è incompleto."
+        )
+    if score == 600:
+        return f"⚠️ Audio {target_label}: rilascio MULTI generico, potrebbe contenerlo"
+    if score == 500:
+        return f"⚠️ Audio {target_label}: rilascio DUAL generico, potrebbe contenerlo"
+    if score == 400:
+        return f"❓ Audio {target_label}: MULTI con altre lingue dichiarate, possibile su traccia non disclosed"
+    if score == 200:
+        return f"❓ Audio {target_label}: DUAL con altra lingua già dichiarata, bassa probabilità"
+    return f"❓ Audio {target_label}: probabilità incerta (score {score})"
+
+
+def _picker_confidence_legend(releases, target_code):
+    """When at least one release in the picker has an ambiguity marker, prepend
+    a one-line legend explaining the emojis. Otherwise return ""."""
+    if not target_code:
+        return ""
+    has_warn = has_quest = has_block = False
+    for rel in releases:
+        s = score_release_language_confidence(rel, target_code)
+        if s is None or s == 1000:
+            continue
+        if s <= 100:
+            has_block = True
+        elif s < 500:
+            has_quest = True
+        else:
+            has_warn = True
+    if not (has_warn or has_quest or has_block):
+        return ""
+    parts = []
+    if has_warn:
+        parts.append("⚠️ probabile")
+    if has_quest:
+        parts.append("❓ incerto")
+    if has_block:
+        parts.append("🚫 lo scrape dice no")
+    return "<i>Legenda: " + " · ".join(parts) + "</i>\n"
+
+
 def get_release_audio_languages(release):
     """Cached wrapper around `scrape_release_audio_languages`. Keyed by infoHash
     (or guid as a fallback) so repeat lookups within one process do not hit
@@ -1607,37 +1672,43 @@ def get_release_audio_languages(release):
     return result
 
 
+# Score floor used when the scraper actively refutes the target. The release is
+# kept (gate-open policy: false positives are cheaper than missing the right
+# release) but pushed to the bottom of the picker.
+_SCRAPE_REFUTED_SCORE = 50
+
+
 def score_release_language_confidence(release, target_code, allow_scrape=True):
     """Return a confidence score 0..1000 that `release` contains an audio track
-    in `target_code`. Higher = more likely. Returns None when the release
-    cannot plausibly contain the target (e.g. ENG-only release with target=ITA).
+    in `target_code`. Higher = more likely. Returns None ONLY when the release
+    is single-language and clearly non-target (e.g. a release tagged ENG with
+    no MULTI/DUAL marker and no scrape confirming target).
 
-    Heuristic, never authoritative — post-grab ffprobe is the final gate.
+    Gate-open policy: ambiguous releases are surfaced with a low score and a
+    UI marker, never silently dropped. Post-grab ffprobe is the final gate
+    and the audio-mismatch flow lets the user re-pick.
 
     Score scale:
-      1000  target_code explicitly declared in the release title or Radarr
-            languages array, OR confirmed by indexer audio scrape
-       600  MULTI marker alone, no other concrete language declared. MULTI
-            typically means 3+ audio tracks; the target has a real chance.
-       500  DUAL marker alone, no other concrete language declared. DUAL means
-            exactly 2 tracks; one is unknown but could be the target.
-       400  MULTI + one or more other concrete languages declared. Still
-            plausible because MULTI usually exceeds 2 tracks even after the
-            disclosed ones, so the target may sit on an undisclosed track.
-       200  DUAL + another concrete language declared. DUAL only has 2 tracks
-            and one is already not the target → low odds but not impossible
-            (rare mislabelled releases).
-       None Single-language release with a non-target language, empty
-            detection, OR indexer audio scrape proved the release does not
-            contain the target.
+      1000  target_code explicitly declared OR confirmed by indexer audio scrape
+       600  MULTI marker alone, no other concrete language declared
+       500  DUAL marker alone, no other concrete language declared
+       400  MULTI + one or more other concrete languages declared
+       200  DUAL + another concrete language declared
+        50  scraper actively refuted the target (audio scrape was non-empty
+            and the target was not in it). Kept because scrapes can be
+            partial (subs vs audio confusion, missing tracks on the page,
+            wrong MediaInfo block).
+      None  single-language release with a non-target language AND no scrape
+            confirmation (the only case we still hide outright; otherwise a
+            user looking for ITA would see every pure-ENG/FRA/HIN release).
 
     When `allow_scrape` is True (default) and the parser would assign a score
-    in the ambiguous 200..600 range, the function consults
-    `get_release_audio_languages` to look up the real audio-track list from
-    the indexer description page. If the scrape returns:
+    in the ambiguous 200..600 range OR the release looks single-language
+    non-target, the function consults `get_release_audio_languages` to fetch
+    the real audio-track list. If the scrape returns:
       target in audio    → bumped to 1000 (confirmed)
       audio non-empty
-        and target absent → dropped to None (refuted)
+        and target absent → floored to 50 (refuted but kept)
       anything else      → keep the parser score (scrape inconclusive)."""
     if not target_code:
         return None
@@ -1649,20 +1720,27 @@ def score_release_language_confidence(release, target_code, allow_scrape=True):
     markers = {"MULTI", "DUAL"}
     has_marker = bool(langs & markers)
     concrete_others = langs - markers
-    if not has_marker:
-        return None
-    if not concrete_others:
-        base = 600 if "MULTI" in langs else 500
-    elif "MULTI" in langs:
-        base = 400
+    # Compute parser baseline first.
+    if has_marker:
+        if not concrete_others:
+            base = 600 if "MULTI" in langs else 500
+        elif "MULTI" in langs:
+            base = 400
+        else:
+            base = 200
     else:
-        base = 200
+        # Single-language, non-target release. We will only keep it if the
+        # scrape confirms target.
+        base = None
     if allow_scrape:
         scraped = get_release_audio_languages(release)
         if scraped:
             if target_code in scraped:
                 return 1000
-            return None
+            # Scrape produced concrete languages but target is not among them.
+            # Gate-open: keep with floor score so the user can still pick it
+            # if they have ground-truth knowledge the scrape missed.
+            return _SCRAPE_REFUTED_SCORE
     return base
 
 
@@ -1770,7 +1848,12 @@ def format_release_button(release, target_code=None):
     if target_code:
         score = score_release_language_confidence(release, target_code)
         if score is not None and score < 1000:
-            marker = "❓" if score < 500 else "⚠️"
+            if score <= 100:
+                marker = "🚫"   # scraper actively refuted; user override possible
+            elif score < 500:
+                marker = "❓"
+            else:
+                marker = "⚠️"
             label = f"{marker} {label}"
     rejected = release.get("rejections") or []
     if rejected:
@@ -3486,9 +3569,11 @@ def _render_release_page(film_hash, page, progress_msg_id=None):
         warning = "\n⚠️ Tutti i rilasci in questa pagina hanno rejection di Radarr — verifica prima di scegliere."
 
     lang_line = _format_lang_filter_line(entry.get("lang"), entry.get("lang_source"))
+    legend = _picker_confidence_legend(releases, entry.get("lang"))
     body = (
         f"🎬 <b>{title_label}</b>\n"
         f"{lang_line}"
+        f"{legend}"
         f"Scegli il rilascio (pagina {page + 1}/{total_pages}, {len(releases)} totali):\n"
         f"<i>quality · size · lingua · seeders</i>{warning}"
     )
@@ -3518,11 +3603,17 @@ def _render_release_confirm(film_hash, release_idx, progress_msg_id=None):
 
     title_label = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
     lang_line = _format_lang_filter_line(entry.get("lang"), entry.get("lang_source"))
+    confidence_line = ""
+    if entry.get("lang"):
+        desc = _confidence_description(rel, entry["lang"])
+        if desc:
+            confidence_line = f"{desc}\n"
     body = (
         f"⬇️ <b>Conferma grab</b>\n\n"
         f"🎬 <b>{title_label}</b>\n"
         f"{lang_line}"
         f"{flag} {'+'.join(langs)} · {quality} · {size}\n"
+        f"{confidence_line}"
         f"📡 Indexer: {indexer}\n"
         f"👥 {seeders}↑ / {leechers}↓\n\n"
         f"<i>{rel.get('title','?')[:200]}</i>"
