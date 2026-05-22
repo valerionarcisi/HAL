@@ -1484,31 +1484,51 @@ _SCRAPE_TIMEOUT = 8  # seconds, hard cap
 def _scrape_audio_from_mediainfo_text(text):
     """Parse a MediaInfo / NFO-style dump and extract audio-track languages.
 
-    Looks for `Audio` lines or `Language : <X>` entries and maps token words
-    back to LANGUAGE_REGISTRY codes via _TOKEN_TO_CODE. Returns a set of
-    3-letter codes (possibly empty if no audio info present)."""
+    Strict: only inspects lines that look like a structured `Audio:` /
+    `Language:` header (key followed by `:` followed by a short payload).
+    The payload is parsed as a comma/slash/plus/ampersand-separated list of
+    language names — narrative prose around the keyword is ignored.
+
+    Defensive choices:
+      - The keyword (`Audio` / `Language`) must be the FIRST alphabetic word
+        on the line (after optional decoration punctuation). This prevents
+        false matches on lines like `Format - AAC` or `Note: ... Hindi Fan
+        Dubbed ...` (the latter would have matched the old loose regex).
+      - The payload is capped at ~120 characters so the parser cannot wander
+        into the storyline.
+      - Words must occur in the LANGUAGE_REGISTRY token set; spurious words
+        (`Dubbed`, `Fan`, `Quality`) are silently ignored.
+      - MULTI / DUAL markers found in the payload are filtered out so the
+        return set always contains concrete language codes.
+
+    Returns a set of 3-letter codes (possibly empty when no structured header
+    is present)."""
     if not text:
         return set()
     found = set()
-    # `Audio ... : English E-AC-3 5.1 / French E-AC-3 5.1`
-    # `Audio: Italian AC3`
-    # `Language       : Italian`
-    # NFO/MediaInfo dumps often decorate lines with leading punctuation/ASCII art
-    # (e.g. "  . Audio ... :"), so accept any non-alpha leader before the keyword.
+    # Two strict patterns:
+    #   `Audio` or `Language` as the first alphabetic word on the line.
+    #   Followed by optional space/punctuation chars.
+    #   Then a literal `:`.
+    #   Then a payload no longer than 120 chars and stopping at end-of-line.
     patterns = [
-        re.compile(r"^[^A-Za-z\n]*Audio[^:]*:\s*(.+)$", re.IGNORECASE | re.MULTILINE),
-        re.compile(r"^[^A-Za-z\n]*Language[^:]*:\s*(.+)$", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^[\s\W]*Audio\b[^:\n]{0,40}:\s*([^\n]{0,120})", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^[\s\W]*Language\b[^:\n]{0,40}:\s*([^\n]{0,120})", re.IGNORECASE | re.MULTILINE),
     ]
     for pat in patterns:
         for match in pat.finditer(text):
             payload = match.group(1)
-            # Split on common track separators (/, |, ,, +) and whitespace.
-            words = re.findall(r"[A-Za-z]+", payload)
-            for w in words:
-                up = w.upper()
-                code = _TOKEN_TO_CODE.get(up)
-                if code and code not in {"MULTI", "DUAL"}:
-                    found.add(code)
+            # Treat the payload as a list separated by /, |, ,, +, &.
+            for chunk in re.split(r"[/|,+&]", payload):
+                # A chunk is one audio track description; the language name is
+                # the FIRST recognised token in it (other words are codec / qty
+                # / extras like `E-AC-3 5.1` or `[HQ Fan Dubbed]`).
+                for w in re.findall(r"[A-Za-z]+", chunk):
+                    up = w.upper()
+                    code = _TOKEN_TO_CODE.get(up)
+                    if code and code not in {"MULTI", "DUAL"}:
+                        found.add(code)
+                        break
     return found
 
 
