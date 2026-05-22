@@ -2,6 +2,7 @@
 state.json
 batches.json
 requests.json
+release_audio_cache.json
 exclude_folders.txt
 
 # Logs
