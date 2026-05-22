@@ -2480,6 +2480,46 @@ class TestAudioMediaInfoParser(unittest.TestCase):
         found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
         self.assertEqual(found, set())
 
+    def test_storyline_with_italian_word_does_not_leak(self):
+        # Regression: a release description that mentions "Italian" in
+        # narrative prose (storyline, plot summary) but has Language: header
+        # listing only Hindi+English MUST NOT add ITA to the audio set.
+        # Real-world sample from TPB id=47852730 (Luca Hindi-dub).
+        text = (
+            "Luca (2021) 720p WEBRip [Hindi + English] Dual-Audio x264\n"
+            ":: Hindi Fan Dubbed ::\n"
+            "Language: Hindi [HQ Fan Dubbed] + English\n"
+            "Note: This is Not A Official Hindi Dubbed Version\n"
+            "Storyline:\n"
+            "Luca Paguro, a young sea monster living off the coast of the "
+            "Italian city Portorosso, spends his daily routine herding "
+            "goatfish."
+        )
+        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        self.assertEqual(found, {"HIN", "ENG"})
+        self.assertNotIn("ITA", found)
+
+    def test_payload_truncated_after_120_chars(self):
+        # Defensive: payload over 120 chars is cut off so the parser cannot
+        # wander into narrative prose attached after a structured header.
+        long_payload = "English / " + ("X" * 200) + " / Italian"
+        text = f"Audio: {long_payload}"
+        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        # English is within the first 120 chars; "Italian" is past the cap.
+        self.assertIn("ENG", found)
+        self.assertNotIn("ITA", found)
+
+    def test_audio_must_be_first_word_not_inside_sentence(self):
+        # A sentence containing "Audio quality is great" must not be parsed
+        # as a track header just because the word Audio appears.
+        text = "Note: Audio quality is great: Italian dubs available"
+        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        # "Audio" here is not the FIRST alphabetic word of the line, but the
+        # current regex `^[\s\W]*Audio\b...` accepts decorative punctuation
+        # before the keyword. "Note: " starts with alpha "N" → does NOT match.
+        # So this test pins that behaviour.
+        self.assertEqual(found, set())
+
 
 class TestScoreWithScrape(unittest.TestCase):
     """Verify score_release_language_confidence uses scrape results to refine
