@@ -33,6 +33,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from threading import Thread
 from queue import Queue, Empty
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =============================================================================
 # CONFIGURATION
@@ -1670,6 +1671,115 @@ def get_release_audio_languages(release):
     if key:
         _AUDIO_SCRAPE_CACHE[key] = result
     return result
+
+
+# Cap concurrent indexer scrapes. The work is I/O-bound; 4 is gentle enough not
+# to anger the indexer hosts while still cutting wall time on a typical batch
+# of 20-30 releases.
+_PREFETCH_MAX_WORKERS = 4
+# Minimum gap between Telegram edits during the prefetch. Telegram rate-limits
+# edits at ~1/sec/chat; the final completion edit bypasses this throttle.
+_PREFETCH_EDIT_INTERVAL = 1.0
+# Skip the "verifica completata" interlude when the prefetch finished in well
+# under this many seconds — otherwise it just flashes and feels like a glitch.
+_PREFETCH_INTERLUDE_MIN_SECONDS = 2.0
+_PREFETCH_INTERLUDE_HOLD_SECONDS = 0.5
+
+
+def _prefetch_audio_scrapes(releases, progress_msg_id, target_lang,
+                            title_label="", max_workers=_PREFETCH_MAX_WORKERS):
+    """Warm `_AUDIO_SCRAPE_CACHE` for releases whose audio language is ambiguous
+    relative to `target_lang`, showing a Telegram progress bar as scrapes
+    complete.
+
+    Filters out releases that either already declare the target explicitly (no
+    scrape needed) or are already cached, then runs the surviving HTTP GETs in
+    a small thread pool. The pool is sized to `_PREFETCH_MAX_WORKERS` so we
+    stay polite to the indexer hosts; per-task exceptions are swallowed so a
+    single bad page never breaks the batch.
+
+    Telegram edits are throttled to `_PREFETCH_EDIT_INTERVAL` seconds with the
+    final completion always emitted, regardless of throttle.
+
+    Returns the count of scrapes actually executed. When the target language
+    is None / falsy, the release list is empty, or every release is already
+    cached, this function is a no-op and returns 0 without any Telegram
+    traffic."""
+    if not target_lang or not releases:
+        return 0
+    pending = []
+    for rel in releases:
+        if target_lang in detect_release_languages(rel):
+            continue
+        key = rel.get("infoHash") or rel.get("guid")
+        if not key:
+            continue
+        if key in _AUDIO_SCRAPE_CACHE:
+            continue
+        pending.append(rel)
+    if not pending:
+        return 0
+
+    total = len(pending)
+    completed = 0
+    last_edit = 0.0
+    header = (
+        f"🔎 Verifico audio sugli indexer per <b>{html.escape(title_label)}</b>…"
+        if title_label
+        else "🔎 Verifico audio sugli indexer…"
+    )
+
+    def _safe_scrape(rel):
+        try:
+            return get_release_audio_languages(rel)
+        except Exception:
+            logging.warning(
+                "prefetch scrape failed for guid=%s", rel.get("guid"),
+                exc_info=True,
+            )
+            return None
+
+    def _render(done):
+        return f"{header}\n{_progress_bar(done, total)}\n{done}/{total} rilasci"
+
+    if progress_msg_id is not None:
+        tg_edit_message(progress_msg_id, _render(0))
+        last_edit = time.time()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_safe_scrape, rel) for rel in pending]
+        for _ in as_completed(futures):
+            completed += 1
+            if progress_msg_id is None:
+                continue
+            now = time.time()
+            is_final = completed == total
+            if is_final or (now - last_edit) >= _PREFETCH_EDIT_INTERVAL:
+                tg_edit_message(progress_msg_id, _render(completed))
+                last_edit = now
+
+    return total
+
+
+def _run_prefetch_with_interlude(releases, progress_msg_id, target_lang,
+                                 title_label=""):
+    """Run `_prefetch_audio_scrapes` and, when the prefetch actually did real
+    work and took non-trivial time, briefly show a "verifica completata"
+    interlude before the caller renders the picker. Hides UI flicker when the
+    prefetch returns immediately."""
+    started = time.time()
+    fetched = _prefetch_audio_scrapes(
+        releases, progress_msg_id, target_lang, title_label=title_label,
+    )
+    if not fetched or progress_msg_id is None:
+        return
+    if (time.time() - started) < _PREFETCH_INTERLUDE_MIN_SECONDS:
+        return
+    tg_edit_message(
+        progress_msg_id,
+        "✅ Verifica completata, costruisco il picker…",
+    )
+    time.sleep(_PREFETCH_INTERLUDE_HOLD_SECONDS)
 
 
 # Score floor used when the scraper actively refutes the target. The release is
@@ -3373,6 +3483,13 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
             tg_send(msg)
         return
 
+    # Warm the audio-language cache BEFORE ranking/filtering so the user sees
+    # progress feedback while the indexer scrape is in flight. When no target
+    # language is set, no scrape is needed and this is a no-op.
+    _run_prefetch_with_interlude(
+        releases, progress_msg_id, target_lang, title_label,
+    )
+
     # Apply the language pre-filter. Multi / dual-audio releases pass through
     # and will be verified post-grab via ffprobe.
     filtered = filter_releases_by_language(releases, target_lang)
@@ -3478,6 +3595,10 @@ def do_scarica_redo(tmdb_id, title, year, lang, lang_source, excluded_guid, prog
         else:
             tg_send(msg)
         return
+
+    _run_prefetch_with_interlude(
+        releases, progress_msg_id, lang, title_label,
+    )
 
     filtered = filter_releases_by_language(releases, lang)
     if lang and not filtered:

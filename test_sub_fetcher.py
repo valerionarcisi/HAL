@@ -4,6 +4,7 @@
 import os
 import sys
 import re
+import time
 import tempfile
 import shutil
 import unittest
@@ -2888,6 +2889,177 @@ class TestFlagFormatting(unittest.TestCase):
 
     def test_unknown(self):
         self.assertEqual(sub_fetcher._flag_for(["?"]), "❔")
+
+
+class TestPrefetchAudioScrapes(unittest.TestCase):
+    """Verify the indexer-scrape prefetch wires up the thread pool, the cache,
+    the throttle, and the exception safety net correctly. The scrape call is
+    always replaced by a stub — no real network is ever touched."""
+
+    def setUp(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def tearDown(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def _rel(self, info_hash, langs=None, title=None):
+        return {
+            "infoHash": info_hash,
+            "guid": f"guid-{info_hash}",
+            "title": title or f"Movie.{info_hash}.1080p.WEB",
+            "languages": [{"id": 99, "name": name} for name in (langs or [])],
+            "infoUrl": "http://x/?id=1",
+        }
+
+    def test_no_releases_is_noop(self):
+        from unittest.mock import patch
+        with patch.object(sub_fetcher, "tg_edit_message") as edit:
+            fetched = sub_fetcher._prefetch_audio_scrapes(
+                [], progress_msg_id=42, target_lang="ITA",
+            )
+        self.assertEqual(fetched, 0)
+        edit.assert_not_called()
+
+    def test_no_target_lang_is_noop(self):
+        # When no language is targeted there's nothing to verify, so the
+        # helper must skip even with a full release list.
+        from unittest.mock import patch
+        rels = [self._rel("a"), self._rel("b")]
+        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
+             patch.object(sub_fetcher, "get_release_audio_languages") as scrape:
+            fetched = sub_fetcher._prefetch_audio_scrapes(
+                rels, progress_msg_id=42, target_lang=None,
+            )
+        self.assertEqual(fetched, 0)
+        edit.assert_not_called()
+        scrape.assert_not_called()
+
+    def test_all_cached_skips_pool_and_only_edits_when_work_exists(self):
+        # Every release is already in the cache → nothing to fetch → no
+        # Telegram edits and no scrape calls.
+        from unittest.mock import patch
+        rels = [self._rel("a"), self._rel("b"), self._rel("c")]
+        for rel in rels:
+            sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
+        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
+             patch.object(sub_fetcher, "get_release_audio_languages") as scrape:
+            fetched = sub_fetcher._prefetch_audio_scrapes(
+                rels, progress_msg_id=42, target_lang="ITA",
+            )
+        self.assertEqual(fetched, 0)
+        edit.assert_not_called()
+        scrape.assert_not_called()
+
+    def test_target_already_declared_skips_scrape(self):
+        # A release that already declares ITA via Radarr's languages field
+        # does NOT need a scrape — score_release_language_confidence will
+        # short-circuit on its own.
+        from unittest.mock import patch
+        rel = self._rel("a", langs=["Italian"])
+        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
+             patch.object(sub_fetcher, "get_release_audio_languages") as scrape:
+            fetched = sub_fetcher._prefetch_audio_scrapes(
+                [rel], progress_msg_id=42, target_lang="ITA",
+            )
+        self.assertEqual(fetched, 0)
+        edit.assert_not_called()
+        scrape.assert_not_called()
+
+    def test_counter_advances_with_pool(self):
+        # Each scrape sleeps briefly to force the pool to actually parallelize
+        # the calls; the helper must emit at minimum the 0-of-N and the final
+        # N-of-N edit. With the 1s throttle and short scrapes, intermediate
+        # edits may or may not fire deterministically.
+        from unittest.mock import patch
+        rels = [self._rel(f"h{i}") for i in range(6)]
+
+        def fake_scrape(rel):
+            time.sleep(0.01)
+            return {"ENG"}
+
+        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
+             patch.object(sub_fetcher, "get_release_audio_languages",
+                          side_effect=fake_scrape):
+            fetched = sub_fetcher._prefetch_audio_scrapes(
+                rels, progress_msg_id=42, target_lang="ITA",
+                title_label="Movie (2024)",
+            )
+
+        self.assertEqual(fetched, 6)
+        # At least the 0/6 priming edit and the final 6/6 edit must fire.
+        self.assertGreaterEqual(edit.call_count, 2)
+        first_text = edit.call_args_list[0].args[1]
+        last_text = edit.call_args_list[-1].args[1]
+        self.assertIn("0/6", first_text)
+        self.assertIn("6/6", last_text)
+        self.assertIn("Movie (2024)", first_text)
+
+    def test_exception_in_one_scrape_does_not_break_batch(self):
+        # If one indexer page throws, the helper must keep going and the
+        # final counter must still reflect every task as completed.
+        from unittest.mock import patch
+        rels = [self._rel(f"h{i}") for i in range(4)]
+        call_count = {"n": 0}
+
+        def fake_scrape(rel):
+            call_count["n"] += 1
+            if rel["infoHash"] == "h2":
+                raise RuntimeError("boom")
+            return {"ENG"}
+
+        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
+             patch.object(sub_fetcher, "get_release_audio_languages",
+                          side_effect=fake_scrape):
+            fetched = sub_fetcher._prefetch_audio_scrapes(
+                rels, progress_msg_id=42, target_lang="ITA",
+            )
+
+        self.assertEqual(fetched, 4)
+        self.assertEqual(call_count["n"], 4)
+        last_text = edit.call_args_list[-1].args[1]
+        self.assertIn("4/4", last_text)
+
+    def test_throttle_collapses_fast_completions(self):
+        # Two near-instant completions must produce a single edit thanks to
+        # the 1s throttle — but the very last completion always emits.
+        from unittest.mock import patch
+        rels = [self._rel("h1"), self._rel("h2")]
+
+        def fake_scrape(rel):
+            return {"ENG"}
+
+        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
+             patch.object(sub_fetcher, "get_release_audio_languages",
+                          side_effect=fake_scrape):
+            fetched = sub_fetcher._prefetch_audio_scrapes(
+                rels, progress_msg_id=42, target_lang="ITA",
+            )
+
+        self.assertEqual(fetched, 2)
+        # 1 priming edit (0/2) + 1 final edit (2/2) = 2 total. The first
+        # completion is throttled out because <1s has elapsed since the
+        # priming edit.
+        self.assertEqual(edit.call_count, 2)
+        first_text = edit.call_args_list[0].args[1]
+        last_text = edit.call_args_list[1].args[1]
+        self.assertIn("0/2", first_text)
+        self.assertIn("2/2", last_text)
+
+    def test_no_progress_msg_id_runs_without_edits(self):
+        # Callers without a message handle (e.g. a future CLI path) must
+        # still get the cache warmed without touching Telegram.
+        from unittest.mock import patch
+        rels = [self._rel(f"h{i}") for i in range(3)]
+
+        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
+             patch.object(sub_fetcher, "get_release_audio_languages",
+                          return_value={"ENG"}):
+            fetched = sub_fetcher._prefetch_audio_scrapes(
+                rels, progress_msg_id=None, target_lang="ITA",
+            )
+
+        self.assertEqual(fetched, 3)
+        edit.assert_not_called()
 
 
 if __name__ == "__main__":
