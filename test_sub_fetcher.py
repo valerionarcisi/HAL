@@ -4094,6 +4094,11 @@ class TestEnrichYoutubeResolution(unittest.TestCase):
     """Bug 1 — verify the yt-dlp probe path parses the print template and
     attaches resolution_label to the corresponding result dict."""
 
+    def setUp(self):
+        # The shared `_YOUTUBE_RESOLUTION_CACHE` would otherwise carry
+        # results between cases and make tests order-dependent.
+        sub_fetcher._YOUTUBE_RESOLUTION_CACHE.clear()
+
     def _runner(self, stdout="", returncode=0):
         def runner(cmd, capture_output=True, text=True, timeout=None):
             class P: pass
@@ -4398,6 +4403,267 @@ class TestFirstDirectorFromCredits(unittest.TestCase):
         self.assertIsNone(sub_fetcher._first_director_from_credits(None))
         self.assertIsNone(sub_fetcher._first_director_from_credits({}))
         self.assertIsNone(sub_fetcher._first_director_from_credits({"crew": []}))
+
+
+# =============================================================================
+# /cerca bug-fix iteration 2 — YouTube cache, callback dedupe, year drift
+# =============================================================================
+
+
+class TestYoutubeResolutionCache(unittest.TestCase):
+    """Bug 1 — `_YOUTUBE_RESOLUTION_CACHE` collapses repeated probes of the
+    same video_id into a single subprocess invocation."""
+
+    def setUp(self):
+        # Reset the shared cache so each test starts from a clean slate.
+        sub_fetcher._YOUTUBE_RESOLUTION_CACHE.clear()
+
+    def _runner(self, stdout, returncode=0, counter=None):
+        def runner(cmd, capture_output=True, text=True, timeout=None):
+            if counter is not None:
+                counter.append(cmd)
+            class P:
+                pass
+            p = P()
+            p.stdout = stdout
+            p.stderr = ""
+            p.returncode = returncode
+            return p
+        return runner
+
+    def test_second_call_hits_cache_no_subprocess(self):
+        calls = []
+        runner = self._runner("720|22|209715200\n", counter=calls)
+        first = sub_fetcher._enrich_youtube_resolution("video_abc", runner=runner)
+        self.assertEqual(first["height"], 720)
+        self.assertEqual(len(calls), 1)
+
+        # Second call must NOT invoke the runner — proof the cache short-
+        # circuits the subprocess path.
+        broken_runner = self._runner("", returncode=1, counter=calls)
+        second = sub_fetcher._enrich_youtube_resolution("video_abc", runner=broken_runner)
+        self.assertEqual(second["height"], 720)
+        self.assertEqual(len(calls), 1)  # still just the first call
+
+    def test_negative_result_is_cached(self):
+        calls = []
+        runner = self._runner("", returncode=1, counter=calls)
+        first = sub_fetcher._enrich_youtube_resolution("video_fail", runner=runner)
+        self.assertIsNone(first)
+        self.assertEqual(len(calls), 1)
+        # Second probe for the same id MUST skip the subprocess.
+        second_runner = self._runner("9999|22|0\n", counter=calls)
+        second = sub_fetcher._enrich_youtube_resolution("video_fail", runner=second_runner)
+        self.assertIsNone(second)
+        self.assertEqual(len(calls), 1)
+
+    def test_cache_lru_evicts_oldest_when_full(self):
+        # Force the cap low for this test.
+        orig_cap = sub_fetcher._YOUTUBE_RESOLUTION_CACHE_MAX
+        try:
+            sub_fetcher._YOUTUBE_RESOLUTION_CACHE_MAX = 2
+            sub_fetcher._YOUTUBE_RESOLUTION_CACHE.clear()
+            sub_fetcher._youtube_resolution_cache_put("a", {"height": 1080})
+            sub_fetcher._youtube_resolution_cache_put("b", {"height": 720})
+            sub_fetcher._youtube_resolution_cache_put("c", {"height": 480})
+            # 'a' should have been evicted.
+            self.assertNotIn("a", sub_fetcher._YOUTUBE_RESOLUTION_CACHE)
+            self.assertIn("b", sub_fetcher._YOUTUBE_RESOLUTION_CACHE)
+            self.assertIn("c", sub_fetcher._YOUTUBE_RESOLUTION_CACHE)
+        finally:
+            sub_fetcher._YOUTUBE_RESOLUTION_CACHE_MAX = orig_cap
+            sub_fetcher._YOUTUBE_RESOLUTION_CACHE.clear()
+
+
+class TestAnsweredCallbackDedupe(unittest.TestCase):
+    """Bug 3 — duplicate callback_query_ids must be answered exactly once.
+    Telegram returns HTTP 400 on the second answer and our log must NOT
+    fill up with bogus errors."""
+
+    def setUp(self):
+        sub_fetcher._ANSWERED_CALLBACK_IDS.clear()
+        sub_fetcher._ANSWERED_CALLBACK_SET.clear()
+
+    def test_second_answer_is_silent_noop(self):
+        from unittest.mock import patch
+        calls = []
+
+        def fake_request(method, data=None):
+            calls.append((method, data))
+            return {"ok": True}
+
+        with patch.object(sub_fetcher, "tg_request", side_effect=fake_request):
+            sub_fetcher.tg_answer_callback("cb-1", "ok")
+            sub_fetcher.tg_answer_callback("cb-1", "ok again")
+            sub_fetcher.tg_answer_callback("cb-1", "and again")
+        # Only the first call reaches the Telegram API.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["callback_query_id"], "cb-1")
+
+    def test_distinct_ids_pass_through(self):
+        from unittest.mock import patch
+        calls = []
+        with patch.object(sub_fetcher, "tg_request",
+                          side_effect=lambda m, d=None: calls.append((m, d)) or {"ok": True}):
+            sub_fetcher.tg_answer_callback("cb-A", "ok")
+            sub_fetcher.tg_answer_callback("cb-B", "ok")
+            sub_fetcher.tg_answer_callback("cb-C", "ok")
+        self.assertEqual(len(calls), 3)
+
+    def test_dedupe_ring_buffer_caps_size(self):
+        # Force a small cap to verify the ring eviction.
+        orig = sub_fetcher._ANSWERED_CALLBACK_IDS.maxlen
+        sub_fetcher._ANSWERED_CALLBACK_IDS = type(sub_fetcher._ANSWERED_CALLBACK_IDS)(maxlen=3)
+        sub_fetcher._ANSWERED_CALLBACK_SET.clear()
+        try:
+            for cid in ("c1", "c2", "c3", "c4"):
+                sub_fetcher._mark_callback_answered(cid)
+            # c1 must have been evicted; c2..c4 must remain.
+            self.assertFalse(sub_fetcher._was_callback_answered("c1"))
+            self.assertTrue(sub_fetcher._was_callback_answered("c2"))
+            self.assertTrue(sub_fetcher._was_callback_answered("c4"))
+        finally:
+            sub_fetcher._ANSWERED_CALLBACK_IDS = type(sub_fetcher._ANSWERED_CALLBACK_IDS)(maxlen=orig)
+            sub_fetcher._ANSWERED_CALLBACK_SET.clear()
+
+    def test_http_400_on_answer_callback_is_demoted_to_debug(self):
+        """tg_request must NOT log an ERROR when answerCallbackQuery 400s —
+        Telegram returns 400 when the callback was already answered (race),
+        which is expected."""
+        import logging as _logging
+        from unittest.mock import patch
+
+        captured = []
+
+        class StubHandler(_logging.Handler):
+            def emit(self, record):
+                captured.append(record)
+
+        handler = StubHandler(level=_logging.DEBUG)
+        sub_fetcher.log.addHandler(handler)
+        prior = sub_fetcher.log.level
+        sub_fetcher.log.setLevel(_logging.DEBUG)
+
+        try:
+            def fake_urlopen(req, timeout=None):
+                raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, None)
+
+            with patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+                sub_fetcher.tg_request("answerCallbackQuery",
+                                       {"callback_query_id": "x", "text": ""})
+            error_records = [r for r in captured if r.levelno >= _logging.ERROR]
+            debug_records = [r for r in captured if r.levelno == _logging.DEBUG]
+            self.assertEqual(error_records, [],
+                             f"unexpected error logs: {[r.getMessage() for r in error_records]}")
+            self.assertTrue(any("already answered" in r.getMessage() for r in debug_records),
+                            f"expected debug log; got {[r.getMessage() for r in debug_records]}")
+        finally:
+            sub_fetcher.log.removeHandler(handler)
+            sub_fetcher.log.setLevel(prior)
+
+
+class TestArchiveYearMismatchWarn(unittest.TestCase):
+    """Bug 10 — when archive.org `year` drifts >2 yr from the TMDb target
+    year, the search keeps the result (might still be the film we want)
+    but emits a warning log."""
+
+    def _opener_returning(self, search_doc, metadata):
+        from contextlib import contextmanager
+        urls = []
+
+        @contextmanager
+        def fake(url, timeout=None):
+            urls.append(url)
+
+            class R:
+                def __init__(self, payload):
+                    self._payload = payload
+                def read(self):
+                    return json.dumps(self._payload).encode("utf-8")
+
+            if "/metadata/" in url:
+                yield R(metadata)
+            else:
+                yield R({"response": {"docs": [search_doc]}})
+
+        return fake, urls
+
+    def test_large_drift_logs_warning_and_keeps_result(self):
+        import logging as _logging
+
+        captured = []
+
+        class StubHandler(_logging.Handler):
+            def emit(self, record):
+                captured.append(record)
+
+        handler = StubHandler(level=_logging.WARNING)
+        sub_fetcher.log.addHandler(handler)
+        try:
+            opener, _ = self._opener_returning(
+                search_doc={
+                    "identifier": "ntld_2007_upload",
+                    "mediatype": "movies",
+                    "title": "Night of the Living Dead",
+                    "year": "2007",
+                    "runtime": "1:36:00",
+                },
+                metadata={
+                    "metadata": {"title": "Night of the Living Dead"},
+                    "files": [{
+                        "name": "ntld.mp4",
+                        "format": "h264 1280x720",
+                        "size": "900000000",
+                        "height": 720,
+                        "width": 1280,
+                    }],
+                },
+            )
+            out = sub_fetcher.search_archive_org("Night of the Living Dead", year=1968, opener=opener)
+            self.assertEqual(len(out), 1, f"result should NOT be excluded, got {out}")
+            warn_messages = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
+            self.assertTrue(any("year mismatch" in m for m in warn_messages),
+                            f"expected year mismatch warning, got {warn_messages}")
+        finally:
+            sub_fetcher.log.removeHandler(handler)
+
+    def test_small_drift_no_warning(self):
+        import logging as _logging
+
+        captured = []
+
+        class StubHandler(_logging.Handler):
+            def emit(self, record):
+                if "year mismatch" in record.getMessage():
+                    captured.append(record)
+
+        handler = StubHandler(level=_logging.WARNING)
+        sub_fetcher.log.addHandler(handler)
+        try:
+            opener, _ = self._opener_returning(
+                search_doc={
+                    "identifier": "ntld_1969",
+                    "mediatype": "movies",
+                    "title": "Night of the Living Dead",
+                    "year": "1969",
+                    "runtime": "1:36:00",
+                },
+                metadata={
+                    "metadata": {"title": "Night of the Living Dead"},
+                    "files": [{
+                        "name": "ntld.mp4",
+                        "format": "h264 1280x720",
+                        "size": "900000000",
+                        "height": 720,
+                        "width": 1280,
+                    }],
+                },
+            )
+            out = sub_fetcher.search_archive_org("Night of the Living Dead", year=1968, opener=opener)
+            self.assertEqual(len(out), 1)
+            self.assertEqual(captured, [])
+        finally:
+            sub_fetcher.log.removeHandler(handler)
 
 
 if __name__ == "__main__":

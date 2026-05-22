@@ -32,9 +32,10 @@ import html
 from xmlrpc.client import ServerProxy
 from pathlib import Path
 from datetime import datetime, timedelta
-from threading import Thread
+from threading import Thread, Lock
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
 
 # =============================================================================
 # CONFIGURATION
@@ -258,9 +259,50 @@ def tg_request(method, data=None):
             req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Bug 3: a 400 on answerCallbackQuery is expected (Telegram only
+        # allows ONE answer per callback within 15s; retries / races trip
+        # this). Log debug instead of error to avoid noisy logs.
+        if method == "answerCallbackQuery" and getattr(e, "code", None) == 400:
+            log.debug(f"Telegram answerCallbackQuery 400 (already answered): {e}")
+            return None
+        log.error(f"Telegram API error ({method}): {e}")
+        return None
     except Exception as e:
         log.error(f"Telegram API error ({method}): {e}")
         return None
+
+
+# Bug 3: in-memory ring buffer of the last 1000 callback_query_ids we have
+# already responded to. Telegram occasionally retries the same callback at
+# the transport layer; without this guard we issue a second
+# answerCallbackQuery that returns HTTP 400 and pollutes the logs.
+_ANSWERED_CALLBACK_IDS = deque(maxlen=1000)
+_ANSWERED_CALLBACK_SET = set()
+_ANSWERED_CALLBACK_LOCK = Lock()
+
+
+def _mark_callback_answered(callback_id):
+    """Remember `callback_id` so subsequent answerCallbackQuery calls with
+    the same id are skipped. The deque ages out old ids automatically; the
+    set mirrors it for O(1) lookups."""
+    if not callback_id:
+        return
+    with _ANSWERED_CALLBACK_LOCK:
+        if callback_id in _ANSWERED_CALLBACK_SET:
+            return
+        if len(_ANSWERED_CALLBACK_IDS) == _ANSWERED_CALLBACK_IDS.maxlen:
+            evicted = _ANSWERED_CALLBACK_IDS[0]
+            _ANSWERED_CALLBACK_SET.discard(evicted)
+        _ANSWERED_CALLBACK_IDS.append(callback_id)
+        _ANSWERED_CALLBACK_SET.add(callback_id)
+
+
+def _was_callback_answered(callback_id):
+    if not callback_id:
+        return False
+    with _ANSWERED_CALLBACK_LOCK:
+        return callback_id in _ANSWERED_CALLBACK_SET
 
 
 def tg_send(text, reply_markup=None):
@@ -275,6 +317,12 @@ def tg_send(text, reply_markup=None):
 
 
 def tg_answer_callback(callback_id, text=""):
+    # Bug 3: pre-check the dedupe set so a duplicate callback_id is a
+    # silent no-op rather than an HTTP 400 from Telegram.
+    if _was_callback_answered(callback_id):
+        log.debug(f"answerCallbackQuery skipped (already answered): {callback_id}")
+        return None
+    _mark_callback_answered(callback_id)
     return tg_request("answerCallbackQuery", {
         "callback_query_id": callback_id,
         "text": text,
@@ -1791,6 +1839,15 @@ def search_archive_org(title, year=None, limit=10, opener=None):
             meta_title = meta_title_raw.strip()
             if meta_title and (" " in meta_title or len(meta_title) > len(search_title)):
                 display_title = meta_title
+        # Bug 10: archive.org `year` is sometimes the upload year rather
+        # than the production year. When the caller passed a TMDb-target
+        # year, warn on big drift (>2 yr) so we keep a paper trail but
+        # never exclude the result — it could still be the right film.
+        if year and ryear and abs(int(ryear) - int(year)) > 2:
+            log.warning(
+                f"  archive.org year mismatch for {ident}: "
+                f"result={ryear} target={year} (kept, may be the right film)"
+            )
         results.append({
             "source": "archive",
             "identifier": ident,
@@ -1823,14 +1880,52 @@ def _ytdlp_cookies_args():
     return []
 
 
+# Bug 1: in-memory cache of YouTube resolution probes keyed by video_id.
+# yt-dlp probes are expensive (1-2s each) and idempotent per video_id; the
+# user may page back/forward over the same results in /cerca and re-render
+# the cards, so caching collapses repeated probes into a single subprocess
+# call. Capped at 512 entries (LRU via insertion order).
+_YOUTUBE_RESOLUTION_CACHE = {}
+_YOUTUBE_RESOLUTION_CACHE_LOCK = Lock()
+_YOUTUBE_RESOLUTION_CACHE_MAX = 512
+
+
+def _youtube_resolution_cache_get(video_id):
+    if not video_id:
+        return None
+    with _YOUTUBE_RESOLUTION_CACHE_LOCK:
+        return _YOUTUBE_RESOLUTION_CACHE.get(video_id)
+
+
+def _youtube_resolution_cache_put(video_id, payload):
+    if not video_id:
+        return
+    with _YOUTUBE_RESOLUTION_CACHE_LOCK:
+        if (
+            len(_YOUTUBE_RESOLUTION_CACHE) >= _YOUTUBE_RESOLUTION_CACHE_MAX
+            and video_id not in _YOUTUBE_RESOLUTION_CACHE
+        ):
+            # Drop oldest insertion (Python 3.7+ dict preserves order).
+            oldest = next(iter(_YOUTUBE_RESOLUTION_CACHE))
+            _YOUTUBE_RESOLUTION_CACHE.pop(oldest, None)
+        _YOUTUBE_RESOLUTION_CACHE[video_id] = payload
+
+
 def _enrich_youtube_resolution(video_id, runner=None, timeout=20):
     """Probe a single YouTube video with `yt-dlp --skip-download --print
     height|format_id|filesize_approx` to discover the resolution of its best
     stream. Returns a dict {height, format_id, filesize_approx} on success or
     None on any failure. Failure is silent because the picker is allowed to
-    fall back to '?' when enrichment cannot determine the resolution."""
+    fall back to '?' when enrichment cannot determine the resolution.
+
+    Cached per video_id in `_YOUTUBE_RESOLUTION_CACHE` so repeated picks of
+    the same result skip the subprocess entirely."""
     if not video_id:
         return None
+    cached = _youtube_resolution_cache_get(video_id)
+    if cached is not None:
+        # Sentinel `False` means "we already probed and got nothing".
+        return None if cached is False else cached
     import subprocess
     runner = runner or subprocess.run
     cmd = [
@@ -1845,8 +1940,10 @@ def _enrich_youtube_resolution(video_id, runner=None, timeout=20):
         proc = runner(cmd, capture_output=True, text=True, timeout=timeout)
     except Exception as e:
         log.debug(f"  yt-dlp probe failed for {video_id}: {e}")
+        _youtube_resolution_cache_put(video_id, False)
         return None
     if proc.returncode != 0:
+        _youtube_resolution_cache_put(video_id, False)
         return None
     for raw_line in (proc.stdout or "").splitlines():
         line = raw_line.strip()
@@ -1864,11 +1961,14 @@ def _enrich_youtube_resolution(video_id, runner=None, timeout=20):
             filesize = int(filesize_raw) if filesize_raw not in ("", "NA", "None") else None
         except ValueError:
             filesize = None
-        return {
+        payload = {
             "height": height,
             "format_id": format_id if format_id not in ("", "NA", "None") else None,
             "filesize_approx": filesize,
         }
+        _youtube_resolution_cache_put(video_id, payload)
+        return payload
+    _youtube_resolution_cache_put(video_id, False)
     return None
 
 
