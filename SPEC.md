@@ -211,7 +211,22 @@ Type any text in Telegram to search. Handles dots/underscores in filenames (e.g.
 | `/translate <name>` | For videos matching `<name>` with an English sub (`.en.srt`, `.eng.srt`, `.english.srt`) but no `.it.srt`, sync each EN sub to audio and then ask the user to confirm the EN→IT translation (Claude). Reuses the batch translate flow. |
 | `/delete <name>` | List all subtitle files (`.it.srt`, `.ita.srt`, `.en.srt`, `.eng.srt`, `.english.srt`, `.italian.srt`, `.it.hi.srt`) for videos matching `<name>` and offer a confirmation. On confirm: deletes the files, removes the videos from `state["downloaded"]` and `state["asked"]`, and re-queues each video for a fresh download. |
 | `/sub <name>` | Manual search by title |
+| `/scarica <name [year]> [--lang CODE]` | Request a new film via Radarr with optional language filter (see "Language-targeted download" below) |
+| `/ita <name [year]>` | Shortcut for `/scarica ... --lang ITA` |
 | `<text>` | Search for videos matching text |
+
+### Language-targeted download (`--lang` flag)
+
+`/scarica` accepts an optional `--lang CODE` flag that filters the Radarr Interactive Search release list and triggers post-grab audio verification once the file lands on disk.
+
+- **Syntax**: `/scarica <title> [year] [--lang CODE]`. The flag can appear anywhere in the message (`/scarica film --lang ITA`, `/scarica --lang JPN film`, `/scarica --lang=fra film`). Accepts 2-letter ISO 639-1 (`it`, `en`, `ja`) or 3-letter ISO 639-2 (`ITA`, `ENG`, `JPN`) or full names (`italian`); internally normalized to a 3-letter code from the LANGUAGE_REGISTRY.
+- **Supported codes**: ITA, ENG, JPN, KOR, FRA, GER, SPA, CHI, RUS. Plus the post-grab-verify markers MULTI and DUAL detected on releases (the user does NOT pass these as `--lang`; they are inferred from the release title and trigger ffprobe verification).
+- **Alias `/ita`**: shortcut equivalent to `/scarica ... --lang ITA`. Wired into the command alias registry, exposed in `/aiuto`, and surfaced in the "did you mean?" reply for close typos.
+- **Default = VO**: without `--lang`, the bot queries TMDb for the picked film's `original_language` and maps it (`ja → JPN`, `it → ITA`, `en → ENG`, …) to a registry code. If TMDb returns a language we don't track, a banner is shown and no filter is applied. If `TMDB_API_KEY` is missing, the bot tells the user and proceeds without filter.
+- **Pre-filter**: after `RadarrClient.releases()` returns, the list is filtered to keep only releases whose `detect_release_languages` set includes the target. MULTI/DUAL releases pass through unconditionally (they may contain the target track; verified post-grab). The existing `rank_releases` ordering then applies to the filtered list. Empty filter → friendly suggestion to retry without `--lang`.
+- **Source banner**: the release picker and the grab-confirmation card both show `🔤 Filtro: 🇮🇹 ITA (esplicito)` or `🔤 Filtro: 🇯🇵 JPN (VO da TMDb)` so the user knows where the filter came from.
+- **Post-grab verification**: each grabbed release stores `required_lang` in `requests.json` (`null` when no filter was applied or when the target was MULTI/DUAL). When the file lands and `_save_sub_and_update_state` matches a pending request, `verify_audio_language(video_path, required_lang)` inspects ffprobe `language` and `title` tags. On match → normal `📬 Pronto` notification. On mismatch → warning with `[✅ Tieni]` / `[🔁 Ri-richiedi]` inline buttons. The redo path skips TMDb / Radarr re-add and shows a fresh release list filtered on the same language, excluding the release the user just rejected.
+- **False-positive safety**: release-title detection splits on non-alpha characters so 2-letter codes like `IT`, `EN`, `JP` never match inside common English words (HOBBIT, LIMIT, WHITE, iTunes).
 
 ## Configuration (Environment Variables)
 | Variable | Required | Description |

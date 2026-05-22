@@ -500,6 +500,83 @@ def tmdb_get_original_language(title, year=None, is_tv=False):
     return lang
 
 
+def tmdb_get_original_language_for_tmdb_id(tmdb_id):
+    """Return the `original_language` ISO 639-1 code (e.g. 'it', 'ja') for a
+    known TMDb movie id, or None on failure. Used by /scarica to default the
+    `--lang` filter to the film's original language when the user did not pass
+    an explicit override."""
+    if not TMDB_API_KEY or not tmdb_id:
+        return None
+    url = f"{TMDB_API_URL}/movie/{tmdb_id}?api_key={TMDB_API_KEY}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        log.warning(f"  TMDb movie lookup error for {tmdb_id}: {e}")
+        return None
+    lang = data.get("original_language")
+    if lang:
+        log.debug(f"  TMDb original_language for tmdb_id={tmdb_id}: {lang}")
+    return lang
+
+
+def tmdb_iso1_to_code(iso1):
+    """Map a TMDb ISO 639-1 code (e.g. 'it') to a registry 3-letter code
+    (e.g. 'ITA'). Returns None for languages we don't track."""
+    if not iso1:
+        return None
+    return _TMDB_ISO1_TO_CODE.get(iso1.lower())
+
+
+def verify_audio_language(video_path, required_code):
+    """Return True iff the video file's audio streams contain a track matching
+    `required_code` (a 3-letter ISO code from LANGUAGE_REGISTRY). Inspects both
+    `language` and `title` ffprobe tags. Always returns True when the caller
+    didn't request a specific language (required_code is None) — used as a
+    "no-op gate" by post-grab notification code.
+
+    Failures (ffprobe missing, file unreadable, malformed JSON) return False so
+    the caller can surface the mismatch to the user instead of silently
+    declaring success."""
+    if required_code is None:
+        return True
+    spec = LANGUAGE_REGISTRY.get(required_code)
+    if not spec:
+        return False
+    # Build a single, lowercase set of acceptable substrings: the registry
+    # tokens plus a few common long-name variants. Comparison is substring on
+    # the lowercased ffprobe tag so "Japanese (5.1 Atmos)" matches "japanese".
+    needles = {t.lower() for t in spec["tokens"]}
+    iso1 = spec.get("tmdb_iso1")
+    if iso1:
+        needles.add(iso1)
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-select_streams", "a", video_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return False
+        data = json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+        log.debug(f"verify_audio_language ffprobe failed for {os.path.basename(video_path)}: {e}")
+        return False
+    for stream in data.get("streams", []):
+        tags = stream.get("tags", {}) or {}
+        lang_tag = (tags.get("language") or "").lower()
+        title_tag = (tags.get("title") or "").lower()
+        for needle in needles:
+            if not needle:
+                continue
+            # Exact match on the language tag (ffprobe usually returns 3-letter
+            # ISO codes like 'jpn' / 'ita'), substring match on the human title.
+            if lang_tag == needle or needle in title_tag:
+                return True
+    return False
+
+
 def is_italian_original(video_path):
     """Return True if TMDb says this film/series was made in Italian.
     Used to skip the subtitle search for Italian-original content (e.g.
@@ -1251,39 +1328,81 @@ class RadarrClient:
         return self._request("POST", "/release", body={"guid": guid, "indexerId": indexer_id})
 
 
-# Languages that frequently appear in release titles. Order matters: longer
-# tokens first so we match "ENGLISH" before "ENG".
-_LANG_TOKENS = [
-    ("ITALIAN", "ITA"), ("ITA", "ITA"), ("iTALiAN", "ITA"),
-    ("ENGLISH", "ENG"), ("ENG", "ENG"),
-    ("MULTI", "MULTI"), ("MULTi", "MULTI"),
-    ("FRENCH", "FRE"), ("FR", "FRE"),
-    ("SPANISH", "SPA"), ("CASTELLANO", "SPA"),
-    ("GERMAN", "GER"),
-]
+# Language registry: ISO 639-2/T 3-letter code -> spec used by detection,
+# normalization and post-grab verification.
+#
+#   tokens:     uppercase tokens that appear in release titles for this language.
+#               Match is word-boundary by construction (release titles are split
+#               on non-alpha chars before lookup), so "IT" never matches WHITE,
+#               LIMIT, HOBBIT or ITUNES.
+#   tmdb_iso1:  ISO 639-1 code as returned by TMDb's `original_language` field.
+#   flag:       Telegram flag/emoji used in user-facing strings.
+#   verify:     True iff a release tagged with this code is multi-track
+#               ("MULTI", "DUAL"...) and must be verified post-grab via ffprobe
+#               against the real target language. Single-language codes have
+#               verify=False.
+LANGUAGE_REGISTRY = {
+    "ITA": {"tokens": ["ITA", "ITALIAN", "IT"], "tmdb_iso1": "it", "flag": "🇮🇹", "verify": False},
+    "ENG": {"tokens": ["ENG", "ENGLISH", "EN"], "tmdb_iso1": "en", "flag": "🇬🇧", "verify": False},
+    "JPN": {"tokens": ["JPN", "JAP", "JAPANESE", "JP", "JA"], "tmdb_iso1": "ja", "flag": "🇯🇵", "verify": False},
+    "KOR": {"tokens": ["KOR", "KOREAN", "KO"], "tmdb_iso1": "ko", "flag": "🇰🇷", "verify": False},
+    "FRA": {"tokens": ["FRA", "FRE", "FRENCH", "FR"], "tmdb_iso1": "fr", "flag": "🇫🇷", "verify": False},
+    "GER": {"tokens": ["GER", "DEU", "GERMAN", "DE"], "tmdb_iso1": "de", "flag": "🇩🇪", "verify": False},
+    "SPA": {"tokens": ["SPA", "ESP", "SPANISH", "CASTELLANO", "ES"], "tmdb_iso1": "es", "flag": "🇪🇸", "verify": False},
+    "CHI": {"tokens": ["CHI", "CHN", "CHINESE", "MAN", "MANDARIN", "ZH"], "tmdb_iso1": "zh", "flag": "🇨🇳", "verify": False},
+    "RUS": {"tokens": ["RUS", "RUSSIAN", "RU"], "tmdb_iso1": "ru", "flag": "🇷🇺", "verify": False},
+    "MULTI": {"tokens": ["MULTI", "MULTILANG"], "tmdb_iso1": None, "flag": "🌐", "verify": True},
+    "DUAL": {"tokens": ["DUAL", "DUALAUDIO"], "tmdb_iso1": None, "flag": "🎭", "verify": True},
+}
+
+
+# Build reverse-lookups once at import time.
+_TOKEN_TO_CODE = {tok: code for code, spec in LANGUAGE_REGISTRY.items() for tok in spec["tokens"]}
+_TMDB_ISO1_TO_CODE = {spec["tmdb_iso1"]: code for code, spec in LANGUAGE_REGISTRY.items() if spec["tmdb_iso1"]}
+
+
+def normalize_lang_input(raw):
+    """Normalize a user/CLI language token to a 3-letter ISO code from
+    `LANGUAGE_REGISTRY`. Accepts 2-letter codes ('it', 'EN'), 3-letter codes
+    ('ita', 'ENG'), or full names ('italian', 'JAPANESE').
+    Returns the canonical 3-letter code (e.g. 'ITA') or None if unknown."""
+    if not raw:
+        return None
+    token = re.sub(r"[^A-Za-z]", "", str(raw)).upper()
+    if not token:
+        return None
+    # Direct hit on the token table (covers 2-letter, 3-letter and full names).
+    code = _TOKEN_TO_CODE.get(token)
+    if code:
+        return code
+    # The registry keys themselves are valid inputs ("MULTI", "DUAL").
+    if token in LANGUAGE_REGISTRY:
+        return token
+    return None
 
 
 def detect_release_languages(release):
     """Return a sorted list of language tags (e.g. ['ITA', 'ENG']) for a Radarr release.
-    Prefers Radarr's structured `languages` field; falls back to substring matches
-    on the release title (releases like 'Movie.2024.iTALiAN.ENG.1080p.x265.mkv')."""
+    Prefers Radarr's structured `languages` field; falls back to word-boundary
+    matches on the release title (releases like 'Movie.2024.iTALiAN.ENG.1080p.x265.mkv')."""
     tags = set()
     for lang in release.get("languages", []) or []:
-        name = (lang.get("name") or "").lower()
-        if "italian" in name:
-            tags.add("ITA")
-        elif "english" in name:
-            tags.add("ENG")
-        elif name and name != "unknown":
+        name = (lang.get("name") or "").strip()
+        code = normalize_lang_input(name)
+        if code:
+            tags.add(code)
+        elif name and name.lower() != "unknown":
             tags.add(name[:3].upper())
 
     title = release.get("title") or ""
-    # Use word boundaries so "ENG" doesn't match "ENGAGE" or "MOTHER ENGINE".
+    # Split on non-alpha so "ENG" never matches "ENGAGE" and "IT" never matches
+    # "WHITE", "LIMIT", "HOBBIT" or "ITUNES".
     upper_title = re.sub(r"[^A-Z]+", " ", title.upper())
     title_tokens = set(upper_title.split())
-    for token, normalized in _LANG_TOKENS:
-        if token.upper() in title_tokens:
-            tags.add(normalized)
+    for token in title_tokens:
+        code = _TOKEN_TO_CODE.get(token)
+        if code:
+            tags.add(code)
 
     if not tags:
         tags.add("?")
@@ -1291,16 +1410,64 @@ def detect_release_languages(release):
 
 
 def _flag_for(lang_tags):
-    """Pick a single flag emoji that represents the language mix of a release."""
+    """Pick a single flag emoji that represents the language mix of a release.
+    Preference order: ITA, then any single-language registry entry, then MULTI,
+    DUAL, unknown."""
     if "ITA" in lang_tags:
-        return "🇮🇹"
+        return LANGUAGE_REGISTRY["ITA"]["flag"]
+    for code in lang_tags:
+        spec = LANGUAGE_REGISTRY.get(code)
+        if spec and not spec["verify"]:
+            return spec["flag"]
     if "MULTI" in lang_tags:
-        return "🌐"
-    if "ENG" in lang_tags:
-        return "🇬🇧"
+        return LANGUAGE_REGISTRY["MULTI"]["flag"]
+    if "DUAL" in lang_tags:
+        return LANGUAGE_REGISTRY["DUAL"]["flag"]
     if lang_tags == ["?"]:
         return "❔"
     return "🏳️"
+
+
+def extract_lang_flag(text):
+    """Parse `--lang CODE` (or `--lang=CODE`) from anywhere in `text`. Returns
+    `(remaining_text, normalized_code_or_None, raw_token_or_None)`. The flag is
+    removed from the remaining text so the caller can use it as the bare query.
+    `raw_token` is what the user actually typed (for error messages)."""
+    if not text:
+        return text, None, None
+    # Match `--lang CODE` (space-separated) or `--lang=CODE`. Be liberal about
+    # case in the flag itself; the value is normalized via normalize_lang_input.
+    pattern = re.compile(r"\s*--lang(?:=|\s+)([A-Za-z]{2,})\b", re.IGNORECASE)
+    match = pattern.search(text)
+    if not match:
+        return text.strip(), None, None
+    raw = match.group(1)
+    code = normalize_lang_input(raw)
+    cleaned = (text[:match.start()] + " " + text[match.end():]).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned, code, raw
+
+
+def filter_releases_by_language(releases, target_code):
+    """Keep only releases whose detected languages include `target_code`. Multi
+    and dual-audio releases pass the filter (they may contain the target track)
+    and are flagged for post-grab verification.
+
+    `target_code` is a normalized 3-letter ISO code from LANGUAGE_REGISTRY, or
+    None (no filtering — returns the input unchanged)."""
+    if not target_code:
+        return list(releases)
+    keep = []
+    for rel in releases:
+        langs = detect_release_languages(rel)
+        if target_code in langs:
+            keep.append(rel)
+            continue
+        # Multi / dual-audio releases are kept under the assumption that they
+        # likely include the target language. Post-grab ffprobe verifies.
+        if "MULTI" in langs or "DUAL" in langs:
+            keep.append(rel)
+    return keep
 
 
 def _quality_rank(release):
@@ -1347,6 +1514,25 @@ def _human_size(num_bytes):
             return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
         n /= 1024
     return f"{n:.1f} PB"
+
+
+def _format_lang_filter_line(lang_code, lang_source):
+    """Render the language filter banner shown above the release picker and
+    above the grab confirmation card. Returns "" when no filter is applied so
+    the caller can interpolate it unconditionally."""
+    if not lang_code:
+        return ""
+    spec = LANGUAGE_REGISTRY.get(lang_code)
+    if not spec:
+        return ""
+    if lang_source == "explicit":
+        suffix = "(esplicito)"
+    elif lang_source == "vo":
+        suffix = "(VO da TMDb)"
+    else:
+        suffix = ""
+    suffix_part = f" {suffix}" if suffix else ""
+    return f"🔤 Filtro: {spec['flag']} {lang_code}{suffix_part}\n"
 
 
 def format_release_button(release):
@@ -2170,9 +2356,16 @@ def _save_sub_and_update_state(video_path, sub_path, source, state):
 
 
 def _notify_radarr_request_ready(video_path):
-    """If this video matches a pending /scarica request, send a 'pronto' Telegram
-    notification and clear the request. Match is by title+year derived from the
-    filename, since Radarr's downloaded filename rarely contains the TMDb id."""
+    """If this video matches a pending /scarica request, verify the audio
+    language against the user-requested filter (if any) and send the matching
+    Telegram notification.
+
+    Three paths:
+      1. No required_lang stored -> classic "📬 Pronto" notification, entry cleared.
+      2. required_lang stored and audio matches -> "📬 Pronto" + cleared.
+      3. required_lang stored and audio does NOT match -> warning prompt with
+         [✅ Tieni] / [🔁 Ri-richiedi] inline buttons; the pending entry stays
+         in requests.json until the user picks one of the two."""
     try:
         parsed = parse_video(video_path)
     except Exception:
@@ -2195,12 +2388,39 @@ def _notify_radarr_request_ready(video_path):
     if not matched_key:
         return
 
-    entry = pending.pop(matched_key)
-    save_requests(requests_state)
+    entry = pending[matched_key]
     title_label = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
+    required_lang = entry.get("required_lang")
+
+    if required_lang and not verify_audio_language(video_path, required_lang):
+        # Audio mismatch: keep the entry around so the user can choose to
+        # tolerate the release or trigger a re-request from the saved film_hash.
+        entry["video_path"] = video_path
+        entry["mismatch_at"] = datetime.now().isoformat()
+        save_requests(requests_state)
+        flag = LANGUAGE_REGISTRY.get(required_lang, {}).get("flag", "🏳️")
+        tmdb_id = entry.get("tmdb_id")
+        keyboard = {"inline_keyboard": [[
+            {"text": "✅ Tieni", "callback_data": f"lang_keep:{tmdb_id}"},
+            {"text": "🔁 Ri-richiedi", "callback_data": f"lang_redo:{tmdb_id}"},
+        ]]}
+        tg_send(
+            f"⚠️ <b>{title_label}</b> — atteso audio {flag} <b>{required_lang}</b> "
+            f"ma il file non lo contiene.\n"
+            f"📁 {os.path.basename(video_path)}\n\n"
+            f"Vuoi tenerlo lo stesso o ri-richiedere un altro rilascio?",
+            reply_markup=keyboard,
+        )
+        return
+
+    # Happy path: clear the entry, send the "Pronto" notification.
+    pending.pop(matched_key, None)
+    save_requests(requests_state)
+    lang_line = _format_lang_filter_line(required_lang, entry.get("lang_source"))
     tg_send(
         f"📬 <b>Pronto:</b> {title_label}\n"
         f"📁 {os.path.basename(video_path)}\n"
+        f"{lang_line}"
         f"📡 Era stato richiesto via /scarica ({entry.get('indexer', '?')})."
     )
 
@@ -2651,9 +2871,13 @@ def _levenshtein(a, b):
     return prev[-1]
 
 
-def do_scarica_search(query, progress_msg_id=None):
+def do_scarica_search(query, progress_msg_id=None, lang=None, lang_source=None):
     """Step 1: search TMDb and show film disambiguation buttons.
-    Accepts queries like 'Punch-Drunk Love' or 'Punch-Drunk Love 2002'."""
+    Accepts queries like 'Punch-Drunk Love' or 'Punch-Drunk Love 2002'.
+    `lang` is a 3-letter ISO code from LANGUAGE_REGISTRY (or None = default to
+    the picked film's TMDb original language at step 2). `lang_source` is
+    "explicit" when the user passed --lang, otherwise None — used only for
+    user-facing labels."""
     if not RADARR_URL or not RADARR_API_KEY:
         msg = "❌ Radarr non configurato (mancano RADARR_URL e/o RADARR_API_KEY)."
         if progress_msg_id:
@@ -2689,7 +2913,12 @@ def do_scarica_search(query, progress_msg_id=None):
     film_hash = str(abs(hash(("scarica", tuple(c["tmdb_id"] for c in candidates)))))[:8]
     requests = load_requests()
     pending = requests.setdefault("pending_radarr", {})
-    pending[f"candidates:{film_hash}"] = {"candidates": candidates, "ts": datetime.now().isoformat()}
+    pending[f"candidates:{film_hash}"] = {
+        "candidates": candidates,
+        "ts": datetime.now().isoformat(),
+        "lang": lang,
+        "lang_source": lang_source,
+    }
     save_requests(requests)
 
     rows = []
@@ -2708,18 +2937,25 @@ def do_scarica_search(query, progress_msg_id=None):
 
 
 def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
-    """Step 2: add the film to Radarr (no auto-grab) and show the release list."""
+    """Step 2: add the film to Radarr (no auto-grab) and show the release list.
+    Reads the persisted `lang` / `lang_source` from the candidates entry (set
+    at step 1 by `do_scarica_search`); when `lang` is None, defaults to the
+    film's TMDb original language and labels the source as "VO from TMDb"."""
     client = RadarrClient()
     requests_state = load_requests()
     pending = requests_state.setdefault("pending_radarr", {})
 
     entry = pending.get(f"candidates:{film_hash}")
     candidate = None
+    explicit_lang = None
+    explicit_lang_source = None
     if entry:
         for c in entry.get("candidates", []):
             if c["tmdb_id"] == tmdb_id:
                 candidate = c
                 break
+        explicit_lang = entry.get("lang")
+        explicit_lang_source = entry.get("lang_source")
     if not candidate:
         # Re-fetch from TMDb so the flow doesn't dead-end if requests.json was cleared.
         try:
@@ -2739,6 +2975,24 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
         }
 
     title_label = f"{candidate['title']}" + (f" ({candidate['year']})" if candidate.get("year") else "")
+
+    # Resolve the language filter for this request.
+    target_lang = explicit_lang
+    target_source = explicit_lang_source  # "explicit" | "vo" | None
+    if target_lang is None:
+        if not TMDB_API_KEY:
+            tg_send("ℹ️ TMDB_API_KEY non configurata, scarico senza filtro lingua.")
+        else:
+            iso1 = tmdb_get_original_language_for_tmdb_id(tmdb_id)
+            mapped = tmdb_iso1_to_code(iso1)
+            if mapped:
+                target_lang = mapped
+                target_source = "vo"
+            elif iso1:
+                tg_send(
+                    f"ℹ️ Lingua originale TMDb '<code>{html.escape(iso1)}</code>' "
+                    f"non riconosciuta, mostro tutti i rilasci."
+                )
 
     # Check if Radarr already has the file on disk — short-circuit if so.
     try:
@@ -2810,7 +3064,24 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
             tg_send(msg)
         return
 
-    ranked = rank_releases(releases)
+    # Apply the language pre-filter. Multi / dual-audio releases pass through
+    # and will be verified post-grab via ffprobe.
+    filtered = filter_releases_by_language(releases, target_lang)
+    if target_lang and not filtered:
+        flag = LANGUAGE_REGISTRY[target_lang]["flag"]
+        msg = (
+            f"⚠️ Nessun rilascio in {flag} <b>{target_lang}</b> trovato per "
+            f"<b>{title_label}</b>.\n"
+            f"Prova senza <code>--lang</code> per vedere tutti i rilasci, "
+            f"o riprova più tardi."
+        )
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    ranked = rank_releases(filtered)
     # Strip Radarr's bulky fields we don't need to persist (full title list comments etc.)
     slim = []
     for r in ranked:
@@ -2833,9 +3104,114 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
         "title": candidate["title"],
         "year": candidate.get("year"),
         "releases": slim,
+        "lang": target_lang,
+        "lang_source": target_source,
         "ts": datetime.now().isoformat(),
     }
     pending.pop(f"candidates:{film_hash}", None)
+    save_requests(requests_state)
+
+    _render_release_page(film_hash, page=0, progress_msg_id=progress_msg_id)
+
+
+def do_scarica_redo(tmdb_id, title, year, lang, lang_source, excluded_guid, progress_msg_id=None):
+    """Re-render the release list for an already-known TMDb film, applying the
+    same language filter and skipping the release the user just rejected.
+
+    Unlike `do_scarica_releases`, this entry point does NOT re-add the film to
+    Radarr (it's already there) and does not re-run TMDb disambiguation."""
+    if not RADARR_URL or not RADARR_API_KEY:
+        msg = "❌ Radarr non configurato (mancano RADARR_URL e/o RADARR_API_KEY)."
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    client = RadarrClient()
+    try:
+        existing = client.find_existing(tmdb_id)
+    except Exception as e:
+        msg = f"❌ Radarr non raggiungibile: {e}"
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    title_label = f"{title}" + (f" ({year})" if year else "")
+    if not existing:
+        msg = f"❌ <b>{title_label}</b> non risulta in Radarr — annullato."
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+    movie_id = existing.get("id")
+
+    try:
+        releases = client.releases(movie_id)
+    except Exception as e:
+        msg = f"❌ Errore Interactive Search: {e}"
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    if excluded_guid:
+        releases = [r for r in releases if r.get("guid") != excluded_guid]
+
+    if not releases:
+        msg = f"⚠️ Nessun altro rilascio disponibile per <b>{title_label}</b>."
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    filtered = filter_releases_by_language(releases, lang)
+    if lang and not filtered:
+        flag = LANGUAGE_REGISTRY[lang]["flag"]
+        msg = (
+            f"⚠️ Nessun altro rilascio in {flag} <b>{lang}</b> per "
+            f"<b>{title_label}</b>."
+        )
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    ranked = rank_releases(filtered)
+    slim = []
+    for r in ranked:
+        slim.append({
+            "guid": r.get("guid"),
+            "indexerId": r.get("indexerId"),
+            "indexer": r.get("indexer"),
+            "title": r.get("title"),
+            "size": r.get("size"),
+            "seeders": r.get("seeders"),
+            "leechers": r.get("leechers"),
+            "quality": r.get("quality"),
+            "languages": r.get("languages"),
+            "rejections": r.get("rejections"),
+        })
+
+    film_hash = str(abs(hash(("scarica_redo", tmdb_id, datetime.now().isoformat()))))[:8]
+    requests_state = load_requests()
+    pending = requests_state.setdefault("pending_radarr", {})
+    pending[f"film:{film_hash}"] = {
+        "tmdb_id": tmdb_id,
+        "movie_id": movie_id,
+        "title": title,
+        "year": year,
+        "releases": slim,
+        "lang": lang,
+        "lang_source": lang_source,
+        "ts": datetime.now().isoformat(),
+    }
     save_requests(requests_state)
 
     _render_release_page(film_hash, page=0, progress_msg_id=progress_msg_id)
@@ -2882,8 +3258,10 @@ def _render_release_page(film_hash, page, progress_msg_id=None):
     if rejected == len(chunk):
         warning = "\n⚠️ Tutti i rilasci in questa pagina hanno rejection di Radarr — verifica prima di scegliere."
 
+    lang_line = _format_lang_filter_line(entry.get("lang"), entry.get("lang_source"))
     body = (
         f"🎬 <b>{title_label}</b>\n"
+        f"{lang_line}"
         f"Scegli il rilascio (pagina {page + 1}/{total_pages}, {len(releases)} totali):\n"
         f"<i>quality · size · lingua · seeders</i>{warning}"
     )
@@ -2912,9 +3290,11 @@ def _render_release_confirm(film_hash, release_idx, progress_msg_id=None):
     rejections = rel.get("rejections") or []
 
     title_label = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
+    lang_line = _format_lang_filter_line(entry.get("lang"), entry.get("lang_source"))
     body = (
         f"⬇️ <b>Conferma grab</b>\n\n"
         f"🎬 <b>{title_label}</b>\n"
+        f"{lang_line}"
         f"{flag} {'+'.join(langs)} · {quality} · {size}\n"
         f"📡 Indexer: {indexer}\n"
         f"👥 {seeders}↑ / {leechers}↓\n\n"
@@ -3142,21 +3522,58 @@ def _cmd_pulisci(arg, state, excludes):
 def _cmd_scarica(arg, state, excludes):
     if not arg:
         tg_send(
-            "Usa: <code>/scarica nome film [anno]</code>\n"
-            "Es: <code>/scarica Punch-Drunk Love 2002</code>\n"
-            "Cerca su TMDb, lo aggiunge a Radarr e ti fa scegliere il rilascio."
+            "Usa: <code>/scarica nome film [anno] [--lang CODE]</code>\n"
+            "Es: <code>/scarica Punch-Drunk Love 2002 --lang ITA</code>\n"
+            "Senza <code>--lang</code> uso la lingua originale TMDb. "
+            "Scorciatoia: <code>/ita &lt;titolo&gt;</code>."
         )
         return
     if not RADARR_URL or not RADARR_API_KEY:
         tg_send("❌ Radarr non configurato — imposta RADARR_URL e RADARR_API_KEY.")
         return
+
+    query, lang_code, raw_lang = extract_lang_flag(arg)
+    if raw_lang and lang_code is None:
+        tg_send(
+            f"❌ Lingua sconosciuta: <code>{html.escape(raw_lang)}</code>.\n"
+            f"Codici accettati: {', '.join(sorted(LANGUAGE_REGISTRY))}."
+        )
+        return
+    if not query:
+        tg_send(
+            "Usa: <code>/scarica nome film [anno] [--lang CODE]</code>\n"
+            "Mi manca il titolo del film."
+        )
+        return
+
     pos = queue_position()
+    lang_hint = f"\n🔤 Filtro lingua: {LANGUAGE_REGISTRY[lang_code]['flag']} {lang_code}" if lang_code else ""
     result = tg_send(
-        f"🔎 Cerco <b>{arg}</b> su TMDb…"
+        f"🔎 Cerco <b>{html.escape(query)}</b> su TMDb…{lang_hint}"
         + (f"\n⏳ Posizione {pos + 1}" if pos > 0 else "")
     )
     msg_id = result["result"]["message_id"] if result and result.get("ok") else None
-    download_queue.put({"type": "scarica", "query": arg, "msg_id": msg_id})
+    download_queue.put({
+        "type": "scarica",
+        "query": query,
+        "msg_id": msg_id,
+        "lang": lang_code,
+        "lang_source": "explicit" if lang_code else None,
+    })
+
+
+def _cmd_ita(arg, state, excludes):
+    """Shortcut for `/scarica <arg> --lang ITA`. Strips any user-supplied
+    --lang flag so the alias semantics are unambiguous."""
+    if not arg:
+        tg_send(
+            "Usa: <code>/ita nome film [anno]</code>\n"
+            "Es: <code>/ita Punch-Drunk Love 2002</code>\n"
+            "Scorciatoia per <code>/scarica ... --lang ITA</code>."
+        )
+        return
+    cleaned, _, _ = extract_lang_flag(arg)
+    _cmd_scarica(f"{cleaned} --lang ITA".strip(), state, excludes)
 
 
 def _cmd_cerca(arg, state, excludes):
@@ -3270,8 +3687,11 @@ COMMANDS = [
      "group": "Cerca & scarica", "args": "<nome>",
      "desc": "Cerca nella libreria (o scrivi direttamente il nome senza slash)"},
     {"canonical": "/scarica", "aliases": ["/download", "/req"], "handler": _cmd_scarica,
+     "group": "Cerca & scarica", "args": "<nome [anno]> [--lang CODE]",
+     "desc": "Richiedi un nuovo film via Radarr: scegli il rilascio (qualità, lingua, indexer). Senza --lang, default = lingua originale TMDb"},
+    {"canonical": "/ita", "aliases": [], "handler": _cmd_ita,
      "group": "Cerca & scarica", "args": "<nome [anno]>",
-     "desc": "Richiedi un nuovo film via Radarr: scegli il rilascio (qualità, lingua, indexer)"},
+     "desc": "Scorciatoia per /scarica con --lang ITA"},
 
     # Sub management
     {"canonical": "/sincronizza", "aliases": ["/sync"], "handler": _cmd_sincronizza,
@@ -3524,6 +3944,12 @@ def process_callbacks(state, excludes):
 
                     title_label = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
                     langs = detect_release_languages(chosen)
+                    required_lang = entry.get("lang")
+                    # Only single-language entries trigger a post-grab audio
+                    # check. MULTI / DUAL is a marker on the release, not a
+                    # verification target.
+                    if required_lang and LANGUAGE_REGISTRY.get(required_lang, {}).get("verify"):
+                        required_lang = None
                     pending[f"download:{entry['tmdb_id']}"] = {
                         "title": entry["title"],
                         "year": entry.get("year"),
@@ -3531,20 +3957,96 @@ def process_callbacks(state, excludes):
                         "movie_id": entry["movie_id"],
                         "indexer": chosen.get("indexer"),
                         "release_title": chosen.get("title"),
-                        "languages": langs,
+                        "release_languages": langs,
+                        "release_guid": chosen.get("guid"),
+                        "release_indexer_id": chosen.get("indexerId"),
+                        "required_lang": required_lang,
+                        "lang_source": entry.get("lang_source"),
+                        "film_hash": film_hash,
                         "requested_at": datetime.now().isoformat(),
                         "telegram_msg_id": msg_id,
                     }
                     pending.pop(f"film:{film_hash}", None)
                     save_requests(rs)
                     if msg_id:
+                        lang_line = _format_lang_filter_line(
+                            entry.get("lang"), entry.get("lang_source")
+                        )
                         tg_edit_message(
                             msg_id,
                             f"📥 <b>{title_label}</b> in download via <i>{chosen.get('indexer')}</i>.\n"
+                            f"{lang_line}"
                             f"Ti avviso quando arriva il file + sub ITA."
                         )
                     continue
 
+                continue
+
+            # Audio-mismatch callbacks emitted by _notify_radarr_request_ready
+            # when the grabbed file's ffprobe audio does NOT contain the
+            # required_lang track. data format: `lang_keep:<tmdb_id>` /
+            # `lang_redo:<tmdb_id>`.
+            if action in ("lang_keep", "lang_redo"):
+                _, _, rest = data.partition(":")
+                try:
+                    tmdb_id = int(rest.split(":", 1)[0])
+                except (ValueError, IndexError):
+                    tg_answer_callback(cb_id, "⚠️ Errore")
+                    continue
+                rs = load_requests()
+                pending = rs.setdefault("pending_radarr", {})
+                key = f"download:{tmdb_id}"
+                entry = pending.get(key)
+                if not entry:
+                    tg_answer_callback(cb_id, "⚠️ Operazione scaduta")
+                    continue
+
+                title_label = entry["title"] + (
+                    f" ({entry['year']})" if entry.get("year") else ""
+                )
+                if action == "lang_keep":
+                    pending.pop(key, None)
+                    save_requests(rs)
+                    tg_answer_callback(cb_id, "✅ Tenuto")
+                    if msg_id:
+                        tg_edit_message(
+                            msg_id,
+                            f"✅ <b>{title_label}</b> tenuto nonostante il "
+                            f"mismatch audio. Sub ITA in arrivo come al solito."
+                        )
+                    continue
+
+                # action == "lang_redo"
+                required_lang = entry.get("required_lang")
+                excluded_guid = entry.get("release_guid")
+                pending.pop(key, None)
+                save_requests(rs)
+                tg_answer_callback(cb_id, "🔁 Riprovo")
+                if msg_id:
+                    tg_edit_message(
+                        msg_id,
+                        f"🔁 Ri-richiesta per <b>{title_label}</b> in coda…"
+                    )
+                # Re-trigger the release-list flow with the same lang filter,
+                # excluding the release we just grabbed so the user doesn't
+                # pick it twice.
+                queue_msg = tg_send(
+                    f"🔁 Ricerca rilasci per <b>{title_label}</b>…"
+                )
+                queue_msg_id = (
+                    queue_msg["result"]["message_id"]
+                    if queue_msg and queue_msg.get("ok") else None
+                )
+                download_queue.put({
+                    "type": "scarica_redo",
+                    "tmdb_id": tmdb_id,
+                    "title": entry["title"],
+                    "year": entry.get("year"),
+                    "lang": required_lang,
+                    "lang_source": entry.get("lang_source") or "explicit",
+                    "excluded_guid": excluded_guid,
+                    "msg_id": queue_msg_id,
+                })
                 continue
 
             # Retry-failed callbacks from /falliti
@@ -4368,8 +4870,25 @@ def _queue_worker(state_ref):
             elif job_type == "scarica":
                 query = job["query"]
                 msg_id = job.get("msg_id")
-                log.info(f"  Queue: scarica '{query}'")
-                do_scarica_search(query, progress_msg_id=msg_id)
+                lang = job.get("lang")
+                lang_source = job.get("lang_source")
+                log.info(f"  Queue: scarica '{query}' lang={lang} source={lang_source}")
+                do_scarica_search(query, progress_msg_id=msg_id, lang=lang, lang_source=lang_source)
+            elif job_type == "scarica_redo":
+                msg_id = job.get("msg_id")
+                log.info(
+                    f"  Queue: scarica_redo tmdb_id={job.get('tmdb_id')} "
+                    f"lang={job.get('lang')} excl={job.get('excluded_guid')}"
+                )
+                do_scarica_redo(
+                    tmdb_id=job["tmdb_id"],
+                    title=job["title"],
+                    year=job.get("year"),
+                    lang=job.get("lang"),
+                    lang_source=job.get("lang_source"),
+                    excluded_guid=job.get("excluded_guid"),
+                    progress_msg_id=msg_id,
+                )
             elif job_type == "cleanup":
                 msg_id = job.get("msg_id")
                 log.info("  Queue: cleanup placeholders")
