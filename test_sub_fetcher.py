@@ -2890,5 +2890,243 @@ class TestFlagFormatting(unittest.TestCase):
         self.assertEqual(sub_fetcher._flag_for(["?"]), "❔")
 
 
+class TestPartitionVisibleReleases(unittest.TestCase):
+    """Verify the picker collapses MULTI/DUAL refuted-by-scrape releases under
+    a toggle and falls back to the full list when the filter would empty it."""
+
+    def setUp(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def tearDown(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def _rel(self, title, info_hash, scraped=None):
+        rel = {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
+               "infoHash": info_hash}
+        sub_fetcher._AUDIO_SCRAPE_CACHE[info_hash] = scraped
+        return rel
+
+    def test_no_target_code_returns_full_list_unchanged(self):
+        rels = [self._rel("A.MULTi", "h1", scraped={"ENG", "FRA"}),
+                self._rel("B.ITA", "h2")]
+        visible, refuted = sub_fetcher._partition_visible_releases(rels, None, False)
+        self.assertEqual(visible, rels)
+        self.assertEqual(refuted, 0)
+
+    def test_show_refuted_false_hides_refuted_releases(self):
+        plausible = [self._rel(f"A{i}.ITA", f"p{i}") for i in range(5)]
+        refuted = [self._rel(f"B{i}.MULTi", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(3)]
+        rels = plausible + refuted
+        visible, refuted_count = sub_fetcher._partition_visible_releases(
+            rels, "ITA", show_refuted=False,
+        )
+        self.assertEqual(len(visible), 5)
+        self.assertEqual(refuted_count, 3)
+        for rel in refuted:
+            self.assertNotIn(rel, visible)
+
+    def test_show_refuted_true_returns_all_releases(self):
+        plausible = [self._rel(f"A{i}.ITA", f"p{i}") for i in range(5)]
+        refuted = [self._rel(f"B{i}.MULTi", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(3)]
+        rels = plausible + refuted
+        visible, refuted_count = sub_fetcher._partition_visible_releases(
+            rels, "ITA", show_refuted=True,
+        )
+        self.assertEqual(visible, rels)
+        self.assertEqual(refuted_count, 3)
+
+    def test_all_refuted_falls_back_to_full_list(self):
+        # When every release is refuted, the helper auto-shows everything so
+        # the picker is never empty.
+        refuted = [self._rel(f"B{i}.MULTi", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(4)]
+        visible, refuted_count = sub_fetcher._partition_visible_releases(
+            refuted, "ITA", show_refuted=False,
+        )
+        self.assertEqual(visible, refuted)
+        self.assertEqual(refuted_count, 4)
+
+    def test_no_refuted_returns_zero_count(self):
+        rels = [self._rel(f"A{i}.ITA", f"p{i}") for i in range(3)]
+        visible, refuted_count = sub_fetcher._partition_visible_releases(
+            rels, "ITA", show_refuted=False,
+        )
+        self.assertEqual(visible, rels)
+        self.assertEqual(refuted_count, 0)
+
+
+class TestPickerLegendIncludeRefuted(unittest.TestCase):
+    """The picker legend must include the refuted marker when refuted releases
+    are toggled visible, even if the `releases` slice passed in is the
+    visible-only subset (which by construction has no refuted scores)."""
+
+    def setUp(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def tearDown(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def _rel(self, title, info_hash):
+        return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
+                "infoHash": info_hash}
+
+    def test_include_refuted_true_forces_block_marker(self):
+        rels = [self._rel("Movie.ITA.1080p", "h1")]
+        legend = sub_fetcher._picker_confidence_legend(rels, "ITA", include_refuted=True)
+        self.assertIn("🚫", legend)
+
+    def test_include_refuted_false_suppresses_block_marker(self):
+        r_block = self._rel("Movie.MULTi.1080p", "h-block")
+        sub_fetcher._AUDIO_SCRAPE_CACHE["h-block"] = {"ENG", "FRA"}
+        legend = sub_fetcher._picker_confidence_legend(
+            [r_block], "ITA", include_refuted=False,
+        )
+        self.assertNotIn("🚫", legend)
+
+
+class TestRenderReleasePageCollapse(unittest.TestCase):
+    """Verify _render_release_page paginates over visible releases and surfaces
+    the toggle button when refuted releases are collapsed."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_req_file = sub_fetcher.REQUESTS_FILE
+        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        self.sent = []
+        self.edited = []
+        self._orig_send = sub_fetcher.tg_send
+        self._orig_edit = sub_fetcher.tg_edit_message
+        sub_fetcher.tg_send = lambda body, **kw: self.sent.append((body, kw)) or {"ok": True}
+        sub_fetcher.tg_edit_message = lambda mid, body, **kw: self.edited.append((mid, body, kw)) or {"ok": True}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+        sub_fetcher.REQUESTS_FILE = self._orig_req_file
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        sub_fetcher.tg_send = self._orig_send
+        sub_fetcher.tg_edit_message = self._orig_edit
+
+    def _rel(self, title, info_hash, scraped=None):
+        sub_fetcher._AUDIO_SCRAPE_CACHE[info_hash] = scraped
+        return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
+                "infoHash": info_hash, "size": 1, "seeders": 1, "leechers": 0,
+                "quality": {"quality": {"name": "1080p"}}, "rejections": []}
+
+    def _seed_session(self, film_hash, releases, lang="ITA", show_refuted=False):
+        rs = sub_fetcher.load_requests()
+        rs.setdefault("pending_radarr", {})[f"film:{film_hash}"] = {
+            "tmdb_id": 1, "movie_id": 1, "title": "Foo", "year": 2024,
+            "releases": releases, "lang": lang, "lang_source": "explicit",
+            "show_refuted": show_refuted, "ts": "2024-01-01T00:00:00",
+        }
+        sub_fetcher.save_requests(rs)
+
+    def _last_keyboard(self):
+        if self.sent:
+            return self.sent[-1][1]["reply_markup"]["inline_keyboard"]
+        return self.edited[-1][2]["reply_markup"]["inline_keyboard"]
+
+    def _last_body(self):
+        if self.sent:
+            return self.sent[-1][0]
+        return self.edited[-1][1]
+
+    def test_collapsed_picker_shows_only_plausible_releases_and_toggle(self):
+        plausible = [self._rel(f"A{i}.ITA.1080p", f"p{i}") for i in range(5)]
+        refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(3)]
+        self._seed_session("abc", plausible + refuted)
+        sub_fetcher._render_release_page("abc", page=0)
+        kb = self._last_keyboard()
+        rel_rows = [row for row in kb if row[0]["callback_data"].startswith("radarr_rel:")]
+        self.assertEqual(len(rel_rows), 5)
+        toggle = [row for row in kb if row[0]["callback_data"].startswith("radarr_toggle_refuted:")]
+        self.assertEqual(len(toggle), 1)
+        self.assertIn("Mostra altri 3 rilasci a bassa probabilità", toggle[0][0]["text"])
+        self.assertIn("5 totali", self._last_body())
+
+    def test_expanded_picker_shows_all_and_hide_toggle(self):
+        plausible = [self._rel(f"A{i}.ITA.1080p", f"p{i}") for i in range(5)]
+        refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(3)]
+        self._seed_session("abc", plausible + refuted, show_refuted=True)
+        sub_fetcher._render_release_page("abc", page=0)
+        kb = self._last_keyboard()
+        rel_rows = [row for row in kb if row[0]["callback_data"].startswith("radarr_rel:")]
+        self.assertEqual(len(rel_rows), 8)
+        toggle = [row for row in kb if row[0]["callback_data"].startswith("radarr_toggle_refuted:")]
+        self.assertEqual(len(toggle), 1)
+        self.assertIn("Nascondi 3 rilasci", toggle[0][0]["text"])
+        self.assertIn("8 totali", self._last_body())
+
+    def test_all_refuted_auto_expands_and_persists_flag(self):
+        refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(4)]
+        self._seed_session("abc", refuted)
+        sub_fetcher._render_release_page("abc", page=0)
+        rs = sub_fetcher.load_requests()
+        entry = rs["pending_radarr"]["film:abc"]
+        self.assertTrue(entry["show_refuted"])
+        kb = self._last_keyboard()
+        rel_rows = [row for row in kb if row[0]["callback_data"].startswith("radarr_rel:")]
+        self.assertEqual(len(rel_rows), 4)
+        toggle = [row for row in kb if row[0]["callback_data"].startswith("radarr_toggle_refuted:")]
+        self.assertEqual(len(toggle), 1)
+        self.assertIn("Nascondi 4 rilasci", toggle[0][0]["text"])
+
+    def test_no_target_code_disables_toggle(self):
+        rels = [self._rel(f"A{i}.ENG.1080p", f"p{i}") for i in range(3)]
+        self._seed_session("abc", rels, lang=None)
+        sub_fetcher._render_release_page("abc", page=0)
+        kb = self._last_keyboard()
+        toggle = [row for row in kb if row[0]["callback_data"].startswith("radarr_toggle_refuted:")]
+        self.assertEqual(toggle, [])
+
+    def test_pagination_uses_visible_count_when_collapsed(self):
+        # 12 releases total: 8 plausible + 4 refuted. With show_refuted=False,
+        # only 8 are visible -> 1 page (since RELEASES_PER_PAGE == 8).
+        plausible = [self._rel(f"A{i}.ITA.1080p", f"p{i}") for i in range(8)]
+        refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(4)]
+        self._seed_session("abc", plausible + refuted)
+        sub_fetcher._render_release_page("abc", page=0)
+        body = self._last_body()
+        self.assertIn("pagina 1/1", body)
+        self.assertIn("8 totali", body)
+
+    def test_pagination_uses_full_count_when_expanded(self):
+        plausible = [self._rel(f"A{i}.ITA.1080p", f"p{i}") for i in range(8)]
+        refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(4)]
+        self._seed_session("abc", plausible + refuted, show_refuted=True)
+        sub_fetcher._render_release_page("abc", page=0)
+        body_p0 = self._last_body()
+        self.assertIn("pagina 1/2", body_p0)
+        self.assertIn("12 totali", body_p0)
+        sub_fetcher._render_release_page("abc", page=1)
+        kb = self._last_keyboard()
+        rel_rows = [row for row in kb if row[0]["callback_data"].startswith("radarr_rel:")]
+        self.assertEqual(len(rel_rows), 4)
+        self.assertIn("pagina 2/2", self._last_body())
+
+    def test_toggle_callback_flips_show_refuted_flag(self):
+        plausible = [self._rel(f"A{i}.ITA.1080p", f"p{i}") for i in range(3)]
+        refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
+                   for i in range(2)]
+        self._seed_session("abc", plausible + refuted, show_refuted=False)
+
+        rs = sub_fetcher.load_requests()
+        entry = rs["pending_radarr"]["film:abc"]
+        self.assertFalse(entry["show_refuted"])
+        entry["show_refuted"] = not entry.get("show_refuted", False)
+        sub_fetcher.save_requests(rs)
+
+        reloaded = sub_fetcher.load_requests()
+        self.assertTrue(reloaded["pending_radarr"]["film:abc"]["show_refuted"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1631,9 +1631,15 @@ def _confidence_description(release, target_code):
     return f"❓ Audio {target_label}: probabilità incerta (score {score})"
 
 
-def _picker_confidence_legend(releases, target_code):
+def _picker_confidence_legend(releases, target_code, include_refuted=None):
     """When at least one release in the picker has an ambiguity marker, prepend
-    a one-line legend explaining the emojis. Otherwise return ""."""
+    a one-line legend explaining the emojis. Otherwise return "".
+
+    `include_refuted` lets the caller force-include the refuted marker even
+    when no visible release carries it (e.g. when refuted releases are
+    collapsed under a toggle and we still want to explain the legend). When
+    None (default) the presence of the marker is inferred from `releases`
+    only."""
     if not target_code:
         return ""
     has_warn = has_quest = has_block = False
@@ -1647,6 +1653,10 @@ def _picker_confidence_legend(releases, target_code):
             has_quest = True
         else:
             has_warn = True
+    if include_refuted is True:
+        has_block = True
+    elif include_refuted is False:
+        has_block = False
     if not (has_warn or has_quest or has_block):
         return ""
     parts = []
@@ -1676,6 +1686,47 @@ def get_release_audio_languages(release):
 # kept (gate-open policy: false positives are cheaper than missing the right
 # release) but pushed to the bottom of the picker.
 _SCRAPE_REFUTED_SCORE = 50
+
+
+def _partition_visible_releases(releases, target_code, show_refuted):
+    """Split `releases` into the ones the picker should show by default and a
+    count of refuted-score releases that are being hidden.
+
+    With a `target_code` set, the picker collapses MULTI/DUAL releases the
+    scrape actively refuted (score == _SCRAPE_REFUTED_SCORE) under a toggle so
+    the default view stays focused on plausible matches. When `show_refuted`
+    is True every release is visible and `refuted_count` reports how many of
+    them carry the refuted score.
+
+    Edge case: when the filter would collapse the entire list (no visible
+    release), fall back to showing everything so the user is never left with
+    an empty picker.
+
+    Returns (visible_releases, refuted_count). `target_code=None` -> no
+    partitioning: the full list is visible and refuted_count is 0."""
+    if not target_code:
+        return list(releases), 0
+
+    if show_refuted:
+        refuted_count = sum(
+            1 for rel in releases
+            if score_release_language_confidence(rel, target_code) == _SCRAPE_REFUTED_SCORE
+        )
+        return list(releases), refuted_count
+
+    visible = []
+    refuted_count = 0
+    for rel in releases:
+        score = score_release_language_confidence(rel, target_code)
+        if score == _SCRAPE_REFUTED_SCORE:
+            refuted_count += 1
+        else:
+            visible.append(rel)
+
+    if not visible and refuted_count > 0:
+        return list(releases), refuted_count
+
+    return visible, refuted_count
 
 
 def score_release_language_confidence(release, target_code, allow_scrape=True):
@@ -3415,6 +3466,7 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
         "releases": slim,
         "lang": target_lang,
         "lang_source": target_source,
+        "show_refuted": False,
         "ts": datetime.now().isoformat(),
     }
     pending.pop(f"candidates:{film_hash}", None)
@@ -3519,6 +3571,7 @@ def do_scarica_redo(tmdb_id, title, year, lang, lang_source, excluded_guid, prog
         "releases": slim,
         "lang": lang,
         "lang_source": lang_source,
+        "show_refuted": False,
         "ts": datetime.now().isoformat(),
     }
     save_requests(requests_state)
@@ -3541,15 +3594,28 @@ def _render_release_page(film_hash, page, progress_msg_id=None):
         return
 
     releases = entry["releases"]
-    total_pages = max(1, (len(releases) + RELEASES_PER_PAGE - 1) // RELEASES_PER_PAGE)
+    target_code = entry.get("lang")
+    show_refuted = bool(entry.get("show_refuted", False))
+    visible, refuted_count = _partition_visible_releases(
+        releases, target_code, show_refuted,
+    )
+
+    # _partition_visible_releases auto-falls-back to the full list when the
+    # filter would leave the picker empty; persist that decision so the toggle
+    # label matches the rendered state on the next click.
+    if not show_refuted and refuted_count > 0 and len(visible) == len(releases):
+        show_refuted = True
+        entry["show_refuted"] = True
+        save_requests(requests_state)
+
+    total_pages = max(1, (len(visible) + RELEASES_PER_PAGE - 1) // RELEASES_PER_PAGE)
     page = max(0, min(page, total_pages - 1))
     start = page * RELEASES_PER_PAGE
-    chunk = releases[start:start + RELEASES_PER_PAGE]
+    chunk = visible[start:start + RELEASES_PER_PAGE]
 
-    target_code = entry.get("lang")
     rows = []
-    for offset, rel in enumerate(chunk):
-        global_idx = start + offset
+    for rel in chunk:
+        global_idx = releases.index(rel)
         label = format_release_button(rel, target_code=target_code)
         rows.append([{"text": label, "callback_data": f"radarr_rel:{film_hash}:{global_idx}"}])
 
@@ -3560,21 +3626,34 @@ def _render_release_page(film_hash, page, progress_msg_id=None):
         nav.append({"text": "Avanti ▶️", "callback_data": f"radarr_page:{film_hash}:{page + 1}"})
     if nav:
         rows.append(nav)
+
+    if refuted_count > 0:
+        if show_refuted:
+            toggle_label = f"🙈 Nascondi {refuted_count} rilasci a bassa probabilità"
+        else:
+            toggle_label = f"🚫 Mostra altri {refuted_count} rilasci a bassa probabilità"
+        rows.append([{
+            "text": toggle_label,
+            "callback_data": f"radarr_toggle_refuted:{film_hash}:{page}",
+        }])
+
     rows.append([{"text": "❌ Annulla", "callback_data": f"radarr_cancel:{film_hash}"}])
 
     title_label = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
     rejected = sum(1 for r in chunk if r.get("rejections"))
     warning = ""
-    if rejected == len(chunk):
+    if chunk and rejected == len(chunk):
         warning = "\n⚠️ Tutti i rilasci in questa pagina hanno rejection di Radarr — verifica prima di scegliere."
 
     lang_line = _format_lang_filter_line(entry.get("lang"), entry.get("lang_source"))
-    legend = _picker_confidence_legend(releases, entry.get("lang"))
+    legend = _picker_confidence_legend(
+        visible, target_code, include_refuted=(show_refuted and refuted_count > 0),
+    )
     body = (
         f"🎬 <b>{title_label}</b>\n"
         f"{lang_line}"
         f"{legend}"
-        f"Scegli il rilascio (pagina {page + 1}/{total_pages}, {len(releases)} totali):\n"
+        f"Scegli il rilascio (pagina {page + 1}/{total_pages}, {len(visible)} totali):\n"
         f"<i>quality · size · lingua · seeders</i>{warning}"
     )
     if progress_msg_id:
@@ -4187,7 +4266,7 @@ def process_callbacks(state, excludes):
             # /scarica callbacks: film pick, release pick, pagination, grab, cancel.
             # Hash carried in `data` is the film_hash, not a video path hash, so we
             # short-circuit the path-hash lookup that runs further down.
-            if action in ("radarr_pick", "radarr_rel", "radarr_page", "radarr_grab", "radarr_cancel"):
+            if action in ("radarr_pick", "radarr_rel", "radarr_page", "radarr_grab", "radarr_cancel", "radarr_toggle_refuted"):
                 # data format is action:film_hash[:extra]
                 _, _, rest = data.partition(":")
                 pieces = rest.split(":")
@@ -4220,6 +4299,24 @@ def process_callbacks(state, excludes):
                     except ValueError:
                         tg_answer_callback(cb_id, "⚠️ Errore")
                         continue
+                    tg_answer_callback(cb_id, "")
+                    _render_release_page(film_hash, page, progress_msg_id=msg_id)
+                    continue
+
+                if action == "radarr_toggle_refuted" and len(pieces) >= 2:
+                    try:
+                        page = int(pieces[1])
+                    except ValueError:
+                        tg_answer_callback(cb_id, "⚠️ Errore")
+                        continue
+                    rs = load_requests()
+                    pending = rs.setdefault("pending_radarr", {})
+                    entry = pending.get(f"film:{film_hash}")
+                    if not entry:
+                        tg_answer_callback(cb_id, "⚠️ Sessione scaduta")
+                        continue
+                    entry["show_refuted"] = not entry.get("show_refuted", False)
+                    save_requests(rs)
                     tg_answer_callback(cb_id, "")
                     _render_release_page(film_hash, page, progress_msg_id=msg_id)
                     continue
