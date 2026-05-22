@@ -79,6 +79,8 @@ These are non-negotiable. If you are about to do any of these, stop and ask.
 - **Never re-introduce the legacy OpenSubtitles XML-RPC client.** REST v1 is the only path. Old `OS_USERNAME` / `OS_PASSWORD` env vars are kept as no-ops for backwards compat — do not wire them to anything.
 - **Never trust filenames without `parse_video()` + `_strip_scraper_noise()`.** Real-world inputs contain `www.SceneTime.com - Title (2002).mkv`, `[YTS.MX] Title.2002.mkv`, etc.
 - **Never depend on a non-stdlib library in tests.** Tests run with `python3 -m unittest` and nothing else.
+- **Never commit `secrets/` or anything inside it.** The directory holds yt-dlp cookies and any other private credentials, and is `.gitignore`'d. Code references the cookies file via `YT_COOKIES_FILE` (default `/config/secrets/yt_cookies.txt`); the path must remain configurable via env var so dev machines without cookies still work.
+- **Never re-encode video in the `/cerca` pipeline.** The pipeline only **remuxes** (`ffmpeg -c copy`) downloaded sources into MKV. Re-encoding takes minutes-to-hours and CPU we do not have; if a source is unplayable, the bot reports it and the user picks another result.
 
 ---
 

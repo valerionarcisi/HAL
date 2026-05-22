@@ -210,10 +210,25 @@ Type any text in Telegram to search. Handles dots/underscores in filenames (e.g.
 | `/sync [name]` | Sync all/matching .it.srt to video audio |
 | `/translate <name>` | For videos matching `<name>` with an English sub (`.en.srt`, `.eng.srt`, `.english.srt`) but no `.it.srt`, sync each EN sub to audio and then ask the user to confirm the EN→IT translation (Claude). Reuses the batch translate flow. |
 | `/delete <name>` | List all subtitle files (`.it.srt`, `.ita.srt`, `.en.srt`, `.eng.srt`, `.english.srt`, `.italian.srt`, `.it.hi.srt`) for videos matching `<name>` and offer a confirmation. On confirm: deletes the files, removes the videos from `state["downloaded"]` and `state["asked"]`, and re-queues each video for a fresh download. |
-| `/sub <name>` | Manual search by title |
+| `/sub <name>` | Manual library search by title (was `/cerca` pre-multi-source) |
+| `/cerca <title [year]>` | Multi-source film download — see "Multi-source download (`/cerca`)" below |
 | `/scarica <name [year]> [--lang CODE]` | Request a new film via Radarr with optional language filter (see "Language-targeted download" below) |
 | `/ita <name [year]>` | Shortcut for `/scarica ... --lang ITA` |
 | `<text>` | Search for videos matching text |
+
+### Multi-source download (`/cerca`)
+
+`/cerca <title [year]>` is an alternative to `/scarica` for films that are not easily found on the configured Radarr indexers. The bot searches the **Internet Archive (`archive.org`) and YouTube in parallel**, downloads the chosen result, remuxes it to MKV and installs it under `/media/films/<Title (Year)>/<Title (Year)>.mkv` — the same layout Radarr/Emby/Jellyfin expect, so the file is picked up automatically.
+
+- **Aliases**: `/search`, `/find`.
+- **Sources**:
+  - **archive.org**: `advancedsearch.php` with `mediatype:movies`, followed by a `/metadata/<id>` call per result to find the best video file. Prefers MP4 over MKV/WEBM/AVI; bigger files within a format are preferred (better encode).
+  - **YouTube**: `yt-dlp ytsearchN:<query> --flat-playlist`. Cookies file (`YT_COOKIES_FILE`, default `/config/secrets/yt_cookies.txt`) is passed when present to bypass age-gates and consent walls; missing cookies degrade silently (fewer results, no hard error).
+- **Filters**: YouTube results outside the `60–240 minute` band are dropped (clips, trailers, live streams). Resolution hints are inferred from title keywords (`1080`, `720`, `480`, `4k`/`2160p`). Sub-720p YouTube results are still shown but tagged `⚠️ bassa qualità`.
+- **Flow**: TMDb disambiguation (best match, no list — the search is permissive enough that the first hit is almost always right) → consolidated picker → confirmation card → download (progress bar) → ffmpeg `-c copy` remux to MKV → move into the library folder → Radarr `DownloadedMoviesScan` trigger.
+- **Encoding policy**: **remux only** (`ffmpeg -c copy`). No re-encode. If the source is already MKV, the remux step is skipped.
+- **State**: a short-lived `pending_cerca` namespace in `requests.json` keyed by film hash holds the picker results between step 1 and step 3 so the user can take their time.
+- **Errors**: any failure (network, yt-dlp missing, ffmpeg failure, disk full, library not writable) surfaces as a friendly Telegram message — no stack traces. The temp dir is wiped in all paths.
 
 ### Language-targeted download (`--lang` flag)
 
@@ -240,6 +255,10 @@ Type any text in Telegram to search. Handles dots/underscores in filenames (e.g.
 | `CLAUDE_MODEL` | No | Default: `claude-sonnet-4-20250514` |
 | `OS_USERNAME` | No | Legacy, unused (kept for backwards compat) |
 | `OS_PASSWORD` | No | Legacy, unused (kept for backwards compat) |
+| `YT_COOKIES_FILE` | No | Path inside the container to a Netscape cookies.txt used by yt-dlp for `/cerca` YouTube downloads. Default `/config/secrets/yt_cookies.txt`. Missing file = no cookies (fewer YouTube results, no hard error). |
+| `CERCA_DOWNLOAD_DIR` | No | Library root where `/cerca` installs the final MKV. Default `/media/films`. |
+| `CERCA_MIN_RESOLUTION` | No | Minimum acceptable YouTube resolution (height) for `/cerca`. Default `720`. Lower-res results are still shown but tagged ⚠️ bassa qualità. |
+| `CERCA_FALLBACK_RESOLUTION` | No | Hard floor used by yt-dlp's format selector when no `min` candidate exists. Default `480`. |
 
 ## Dependencies
 | Dependency | Purpose | Install |

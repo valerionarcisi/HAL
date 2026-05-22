@@ -78,7 +78,13 @@ sub-fetcher:
     - RADARR_URL=http://radarr:7878                           # optional, enables /scarica
     - RADARR_API_KEY=your_radarr_key                          # optional, enables /scarica
     - RADARR_PREFERRED_LANGUAGES=ITA,ENG                      # optional, default ITA,ENG
+    # /cerca (multi-source film download) — optional overrides
+    - YT_COOKIES_FILE=/config/secrets/yt_cookies.txt          # optional, default shown
+    - CERCA_DOWNLOAD_DIR=/media/films                         # optional, default shown
+    - CERCA_MIN_RESOLUTION=720                                # optional, default 720
 ```
+
+For `/cerca` to use YouTube reliably, drop a Netscape cookies.txt at `sub-fetcher/secrets/yt_cookies.txt` on the host. The directory is gitignored (`secrets/` in `.gitignore`). yt-dlp uses those cookies to bypass age-gate / consent walls. Without cookies, archive.org still works.
 
 ### 3. Run
 
@@ -93,7 +99,8 @@ The canonical command names are in Italian (the bot speaks Italian), and each on
 ### Search & download
 | Command | Aliases | Description |
 |---|---|---|
-| `/cerca <name>` | `/search`, `/sub` | Search the library (or simply type the name without a slash) |
+| `/sub <name>` | — | Search the local library (or simply type the name without a slash). Was `/cerca` before the multi-source download took that slot. |
+| `/cerca <title [year]>` | `/search`, `/find` | Multi-source film download. Searches archive.org and YouTube in parallel, lets you pick the best result, downloads it, remuxes to MKV and installs it under `/media/films/<Title (Year)>/`. Useful for films that don't show up on the configured Radarr indexers. |
 | `/scarica <name [year]> [--lang CODE]` | `/download`, `/req` | Request a new film via Radarr — TMDb disambiguates, then you pick the release (quality, size, language, indexer) from an inline list. Optional `--lang CODE` filters the release list (e.g. `/scarica Akira --lang JPN`, `/scarica Punch-Drunk Love --lang ITA`). Without `--lang`, defaults to the film's original language from TMDb. Codes: `ITA`, `ENG`, `JPN`, `KOR`, `FRA`, `GER`, `SPA`, `CHI`, `RUS` (2-letter `it`/`en`/`ja`/… and full names also work). Multi-track releases (`MULTI`, `Dual.Audio.JP-EN`) pass the filter and are verified post-grab via ffprobe. |
 | `/ita <name [year]>` | — | Shortcut for `/scarica ... --lang ITA`. |
 

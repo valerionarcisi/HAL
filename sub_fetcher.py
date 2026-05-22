@@ -22,6 +22,7 @@ import base64
 import logging
 import time
 import re
+import tempfile
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -89,6 +90,17 @@ RADARR_PREFERRED_LANGUAGES = [
     s.strip().upper() for s in os.environ.get("RADARR_PREFERRED_LANGUAGES", "ITA,ENG").split(",")
     if s.strip()
 ]
+
+# Multi-source film download (/cerca command — archive.org + YouTube fallback).
+# YT_COOKIES_FILE points to a Netscape cookies.txt that yt-dlp uses to bypass
+# age-gates / consent walls. Kept under /config/secrets so the host bind-mount
+# survives container rebuilds and the file never leaks into git.
+YT_COOKIES_FILE = os.environ.get("YT_COOKIES_FILE", "/config/secrets/yt_cookies.txt")
+CERCA_DOWNLOAD_DIR = os.environ.get("CERCA_DOWNLOAD_DIR", "/media/films")
+# Minimum acceptable resolution by default. Lower-res candidates are still
+# listed but tagged "bassa qualità" so the user knows what they are picking.
+CERCA_MIN_RESOLUTION = int(os.environ.get("CERCA_MIN_RESOLUTION", "720"))
+CERCA_FALLBACK_RESOLUTION = int(os.environ.get("CERCA_FALLBACK_RESOLUTION", "480"))
 
 # Media paths (inside the container, mapped via volumes)
 SERIES_PATH = "/media/series"
@@ -182,15 +194,18 @@ def save_batches(batches):
 
 
 def load_requests():
-    """Pending Radarr requests (films the user asked the bot to download).
-    Kept separate from state.json so /reset doesn't drop them."""
+    """Pending download requests (Radarr-side from `/scarica`, multi-source from
+    `/cerca`). Kept separate from state.json so /reset doesn't drop them."""
     if os.path.exists(REQUESTS_FILE):
         try:
             with open(REQUESTS_FILE, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+                data.setdefault("pending_radarr", {})
+                data.setdefault("pending_cerca", {})
+                return data
         except Exception:
             pass
-    return {"pending_radarr": {}}
+    return {"pending_radarr": {}, "pending_cerca": {}}
 
 
 def save_requests(requests):
@@ -1328,6 +1343,465 @@ class RadarrClient:
     def grab(self, guid, indexer_id):
         """Send the chosen release to the configured download client."""
         return self._request("POST", "/release", body={"guid": guid, "indexerId": indexer_id})
+
+    def trigger_downloaded_movies_scan(self, path):
+        """Ask Radarr to rescan a path so Emby/Jellyfin/Radarr pick up a file
+        dropped into the library by something other than the *arr stack
+        (e.g. our /cerca direct download). Best-effort; failures are logged but
+        not fatal — the bot's own scan loop will still notice the new MKV."""
+        body = {"name": "DownloadedMoviesScan", "path": path}
+        return self._request("POST", "/command", body=body)
+
+
+# =============================================================================
+# MULTI-SOURCE FILM DOWNLOAD (/cerca command — archive.org + YouTube)
+# =============================================================================
+
+# Video extensions accepted from archive.org file lists. .webm is downloaded
+# but remuxed to .mkv before installation.
+_CERCA_VIDEO_EXTS = (".mp4", ".mkv", ".webm", ".m4v", ".avi", ".mov")
+# yt-dlp output schema for the search command. One field per token, pipe-delim.
+_YTDLP_PRINT_FIELDS = ["title", "id", "duration", "uploader"]
+# Bounds to filter out clips, trailers and suspicious uploads. Movies typically
+# clock 80-180 minutes; we accept 60-240 to leave headroom for shorts and
+# director's cuts.
+_CERCA_MIN_DURATION_SEC = 60 * 60
+_CERCA_MAX_DURATION_SEC = 240 * 60
+
+
+def _parse_duration_to_seconds(raw):
+    """Accept either an int/float (seconds), 'HH:MM:SS', 'MM:SS', or 'NNN'
+    (integer seconds as string). Returns None if the input is unusable."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    if ":" in s:
+        try:
+            parts = [int(p) for p in s.split(":")]
+        except ValueError:
+            return None
+        total = 0
+        for part in parts:
+            total = total * 60 + part
+        return total
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
+def _format_duration(total_seconds):
+    """'1h35m' / '47m' style label for inline buttons and confirmation cards.
+    Returns '?' on bad input so callers can interpolate unconditionally."""
+    if total_seconds is None or total_seconds < 0:
+        return "?"
+    secs = int(total_seconds)
+    hours, rem = divmod(secs, 3600)
+    minutes = rem // 60
+    if hours and minutes:
+        return f"{hours}h{minutes:02d}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
+def _safe_film_dirname(title, year):
+    """Plex/Emby/Jellyfin idiomatic folder name: 'Title (Year)'. Strip the few
+    filesystem-hostile characters; everything else is left as-is so accented
+    Italian titles render correctly."""
+    base = title.strip() if title else "Unknown"
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", base).strip()
+    if not cleaned:
+        cleaned = "Unknown"
+    if year:
+        return f"{cleaned} ({year})"
+    return cleaned
+
+
+def _archive_metadata_url(identifier):
+    return f"https://archive.org/metadata/{urllib.parse.quote(identifier)}"
+
+
+def _archive_search_url(query, limit):
+    fields = ["identifier", "title", "year", "runtime", "mediatype", "item_size"]
+    params = [
+        ("q", query),
+        ("rows", str(limit)),
+        ("output", "json"),
+    ]
+    qs = "&".join([f"fl[]={f}" for f in fields] + [f"{k}={urllib.parse.quote(str(v))}" for k, v in params])
+    return f"https://archive.org/advancedsearch.php?{qs}"
+
+
+def _archive_file_url(identifier, file_name):
+    return (
+        f"https://archive.org/download/{urllib.parse.quote(identifier)}/"
+        f"{urllib.parse.quote(file_name)}"
+    )
+
+
+def _pick_best_archive_file(files):
+    """Given the file list of an archive.org item, return (name, size, fmt) for
+    the best video file we want to download. Prefers MP4, then MKV, then WEBM.
+    Returns None if no usable video is present."""
+    if not files:
+        return None
+    candidates = []
+    for entry in files:
+        name = entry.get("name") or ""
+        if not name:
+            continue
+        lower = name.lower()
+        if not lower.endswith(_CERCA_VIDEO_EXTS):
+            continue
+        # Skip side-cars and trailers exposed in the same item.
+        if "trailer" in lower or "sample" in lower:
+            continue
+        try:
+            size = int(entry.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        fmt = entry.get("format") or ""
+        rank = (
+            0 if lower.endswith(".mp4") else
+            1 if lower.endswith(".mkv") else
+            2 if lower.endswith(".m4v") else
+            3 if lower.endswith(".webm") else
+            4
+        )
+        # Bigger file = better encode in archive.org's world.
+        candidates.append((rank, -size, name, size, fmt))
+    if not candidates:
+        return None
+    candidates.sort()
+    _, _, name, size, fmt = candidates[0]
+    return {"name": name, "size": size, "format": fmt}
+
+
+def search_archive_org(title, year=None, limit=10, opener=None):
+    """Search the Internet Archive for video items matching `title`.
+    Returns a list of dicts: {source, identifier, title, year, duration_sec,
+    size, file_name, url}. `opener` is the urlopen callable (injectable for
+    tests). Network failures and missing fields degrade to an empty result —
+    the caller still has YouTube to fall back on."""
+    if not title:
+        return []
+    opener = opener or urllib.request.urlopen
+    q = f'title:("{title}") mediatype:movies'
+    if year:
+        q += f" year:{year}"
+    url = _archive_search_url(q, limit)
+    try:
+        with opener(url, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        log.warning(f"  archive.org search error: {e}")
+        return []
+
+    docs = (data.get("response") or {}).get("docs") or []
+    results = []
+    for d in docs:
+        if d.get("mediatype") != "movies":
+            continue
+        ident = d.get("identifier")
+        if not ident:
+            continue
+        # Hit /metadata to find the real video file. Without this we can't show
+        # size or build a download URL.
+        try:
+            with opener(_archive_metadata_url(ident), timeout=15) as resp:
+                meta = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            log.warning(f"  archive.org metadata error for {ident}: {e}")
+            continue
+        best = _pick_best_archive_file(meta.get("files") or [])
+        if not best:
+            continue
+        runtime = d.get("runtime")
+        duration = _parse_duration_to_seconds(runtime)
+        ryear = d.get("year")
+        try:
+            ryear = int(str(ryear)[:4]) if ryear else None
+        except (TypeError, ValueError):
+            ryear = None
+        results.append({
+            "source": "archive",
+            "identifier": ident,
+            "title": d.get("title") or ident,
+            "year": ryear,
+            "duration_sec": duration,
+            "size": best["size"] or None,
+            "file_name": best["name"],
+            "format": best["format"],
+            "url": _archive_file_url(ident, best["name"]),
+            "uploader": None,
+        })
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _ytdlp_binary():
+    """Allow tests to swap the binary path without touching env."""
+    return os.environ.get("YTDLP_BINARY", "yt-dlp")
+
+
+def _ytdlp_cookies_args():
+    """Return ['--cookies', PATH] when the cookies file exists, otherwise [].
+    Keeps yt-dlp invocations valid on dev machines that lack cookies — the
+    bot just gets fewer YouTube results, no hard error."""
+    if YT_COOKIES_FILE and os.path.exists(YT_COOKIES_FILE):
+        return ["--cookies", YT_COOKIES_FILE]
+    return []
+
+
+def search_youtube(query, limit=8, runner=None):
+    """Run `yt-dlp ytsearchN:<query>` and return a filtered list of candidates:
+    {source, video_id, title, duration_sec, uploader, url}. `runner` is the
+    subprocess.run callable (injectable for tests). Videos shorter than
+    `_CERCA_MIN_DURATION_SEC` (likely clips) or longer than
+    `_CERCA_MAX_DURATION_SEC` (likely livestreams) are dropped. If yt-dlp is
+    missing from PATH or fails, returns []."""
+    if not query:
+        return []
+    import subprocess
+    runner = runner or subprocess.run
+
+    print_fmt = "|".join(f"%({field})s" for field in _YTDLP_PRINT_FIELDS)
+    cmd = [
+        _ytdlp_binary(),
+        "--no-warnings",
+        "--skip-download",
+        "--flat-playlist",
+        "--print", print_fmt,
+        f"ytsearch{int(limit)}:{query}",
+    ] + _ytdlp_cookies_args()
+
+    try:
+        proc = runner(cmd, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        log.warning("  yt-dlp not installed — YouTube search disabled")
+        return []
+    except Exception as e:
+        log.warning(f"  yt-dlp search error: {e}")
+        return []
+
+    if proc.returncode != 0:
+        log.warning(f"  yt-dlp returned {proc.returncode}: {(proc.stderr or '').strip()[:200]}")
+        return []
+
+    out = []
+    for raw_line in (proc.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split("|", len(_YTDLP_PRINT_FIELDS) - 1)
+        if len(parts) < len(_YTDLP_PRINT_FIELDS):
+            continue
+        title, vid, dur_raw, uploader = parts
+        title = title.strip()
+        vid = vid.strip()
+        if not vid or vid in ("NA", "None"):
+            continue
+        duration = _parse_duration_to_seconds(dur_raw if dur_raw not in ("NA", "None") else None)
+        if duration is None:
+            continue
+        if duration < _CERCA_MIN_DURATION_SEC or duration > _CERCA_MAX_DURATION_SEC:
+            continue
+        out.append({
+            "source": "youtube",
+            "video_id": vid,
+            "title": title or vid,
+            "duration_sec": duration,
+            "uploader": uploader.strip() if uploader and uploader not in ("NA", "None") else None,
+            "url": f"https://www.youtube.com/watch?v={vid}",
+        })
+    return out
+
+
+class CercaDownloadError(RuntimeError):
+    """Raised when a multi-source download fails in a recoverable way (network,
+    encoder issue, disk full). The handler converts it to a Telegram message
+    instead of dumping a stack trace."""
+
+
+def download_archive_org(url, dest_path, progress_cb=None, opener=None, chunk_size=1024 * 256):
+    """Stream a single archive.org file to disk. Calls `progress_cb(downloaded,
+    total)` periodically when provided. Returns the destination path on
+    success, raises `CercaDownloadError` otherwise."""
+    opener = opener or urllib.request.urlopen
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    except OSError as e:
+        raise CercaDownloadError(f"cannot create dest dir: {e}") from e
+    try:
+        with opener(url, timeout=60) as resp:
+            total_raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+            total = int(total_raw) if total_raw and str(total_raw).isdigit() else None
+            downloaded = 0
+            with open(dest_path, "wb") as out:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_cb:
+                        try:
+                            progress_cb(downloaded, total)
+                        except Exception:
+                            pass
+    except Exception as e:
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        raise CercaDownloadError(f"archive.org download failed: {e}") from e
+    return dest_path
+
+
+def download_youtube(video_id, dest_dir, min_resolution=None, progress_cb=None, runner=None):
+    """Download a YouTube video via yt-dlp into `dest_dir` and return the
+    resulting file path. `min_resolution` constrains the format selector; on
+    failure we fall back to "best" so the user is not blocked by an exotic
+    upload. Raises `CercaDownloadError` on hard failure (no yt-dlp, non-zero
+    exit). `progress_cb(downloaded_bytes, total_bytes)` is fired while parsing
+    yt-dlp stdout when running interactively; the tests stub the runner so
+    this is best-effort only."""
+    if not video_id:
+        raise CercaDownloadError("missing video_id")
+    import subprocess
+    runner = runner or subprocess.run
+
+    os.makedirs(dest_dir, exist_ok=True)
+    target_height = int(min_resolution if min_resolution else CERCA_MIN_RESOLUTION)
+    fmt = (
+        f"bv*[height>={target_height}]+ba/b[height>={target_height}]"
+        f"/bv*[height>={CERCA_FALLBACK_RESOLUTION}]+ba/b"
+    )
+    out_template = os.path.join(dest_dir, "%(id)s.%(ext)s")
+    cmd = [
+        _ytdlp_binary(),
+        "--no-warnings",
+        "--no-playlist",
+        "-f", fmt,
+        "--merge-output-format", "mkv",
+        "-o", out_template,
+        "--print", "after_move:filepath",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ] + _ytdlp_cookies_args()
+
+    try:
+        proc = runner(cmd, capture_output=True, text=True, timeout=60 * 60)
+    except FileNotFoundError as e:
+        raise CercaDownloadError("yt-dlp not installed") from e
+    except Exception as e:
+        raise CercaDownloadError(f"yt-dlp invocation failed: {e}") from e
+
+    if proc.returncode != 0:
+        raise CercaDownloadError(
+            f"yt-dlp exited {proc.returncode}: {(proc.stderr or '').strip()[:300]}"
+        )
+
+    final_path = None
+    for line in reversed((proc.stdout or "").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        # `after_move:filepath` print yields just the final on-disk path. We
+        # iterate from the bottom to ignore any progress noise above.
+        if os.path.isabs(line) and os.path.exists(line):
+            final_path = line
+            break
+    if not final_path:
+        # Last-resort scan of the dest dir; yt-dlp may print the path through a
+        # different channel on older builds.
+        for name in os.listdir(dest_dir):
+            if name.startswith(video_id):
+                cand = os.path.join(dest_dir, name)
+                if os.path.isfile(cand):
+                    final_path = cand
+                    break
+    if not final_path or not os.path.exists(final_path):
+        raise CercaDownloadError("yt-dlp finished but no output file found")
+    return final_path
+
+
+def remux_to_mkv(src_path, dest_path, runner=None):
+    """Run `ffmpeg -i src -c copy dest` to remux the container to MKV without
+    re-encoding. ~3 seconds for a typical 90-minute video. On success, removes
+    the source. On failure, keeps the source intact and raises
+    `CercaDownloadError`."""
+    if not os.path.isfile(src_path):
+        raise CercaDownloadError(f"source not found: {src_path}")
+    if src_path == dest_path:
+        return src_path
+    import subprocess
+    runner = runner or subprocess.run
+
+    cmd = ["ffmpeg", "-y", "-i", src_path, "-c", "copy", dest_path]
+    try:
+        proc = runner(cmd, capture_output=True, text=True, timeout=15 * 60)
+    except FileNotFoundError as e:
+        raise CercaDownloadError("ffmpeg not installed") from e
+    except Exception as e:
+        raise CercaDownloadError(f"ffmpeg invocation failed: {e}") from e
+
+    if proc.returncode != 0:
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        raise CercaDownloadError(
+            f"ffmpeg exited {proc.returncode}: {(proc.stderr or '').strip()[:300]}"
+        )
+
+    try:
+        os.remove(src_path)
+    except OSError as e:
+        log.warning(f"  remux ok but could not remove source: {e}")
+    return dest_path
+
+
+def install_to_library(src_mkv, title, year, library_dir=None, radarr_scan=True):
+    """Move (or rename) `src_mkv` into '<library_dir>/<Title (Year)>/<Title
+    (Year)>.mkv'. Triggers a Radarr rescan so the *arr stack picks the file up
+    immediately. Returns the final on-disk path. Raises `CercaDownloadError`
+    if the destination is not writable."""
+    if not os.path.isfile(src_mkv):
+        raise CercaDownloadError(f"source not found: {src_mkv}")
+    library_dir = library_dir or CERCA_DOWNLOAD_DIR
+    folder_name = _safe_film_dirname(title, year)
+    dest_folder = os.path.join(library_dir, folder_name)
+    try:
+        os.makedirs(dest_folder, exist_ok=True)
+    except OSError as e:
+        raise CercaDownloadError(f"library not writable ({library_dir}): {e}") from e
+    dest_file = os.path.join(dest_folder, f"{folder_name}.mkv")
+    try:
+        # Same-fs case: cheap rename. Cross-fs case: shutil.move falls back to
+        # copy+unlink under the hood, which is what we want for /media bind
+        # mounts living on a different volume than /tmp.
+        import shutil as _shutil
+        _shutil.move(src_mkv, dest_file)
+    except OSError as e:
+        raise CercaDownloadError(f"failed to install file: {e}") from e
+
+    if radarr_scan:
+        try:
+            RadarrClient().trigger_downloaded_movies_scan(dest_folder)
+        except Exception as e:
+            # Radarr may be unreachable or the bot may run without the env
+            # vars set; the file is already in place so the bot's own scan
+            # loop will still notice it.
+            log.warning(f"  Radarr scan trigger failed (file still installed): {e}")
+    return dest_file
 
 
 # Language registry: ISO 639-2/T 3-letter code -> spec used by detection,
@@ -4042,6 +4516,371 @@ def _render_release_confirm(film_hash, release_idx, progress_msg_id=None):
     return True
 
 
+# =============================================================================
+# /cerca FLOW (multi-source film download — archive.org + YouTube)
+# =============================================================================
+
+# yt-dlp/archive.org results are kept in `requests.json` under a short-lived
+# `pending_cerca` namespace so the user can take their time picking from the
+# inline buttons without re-running the search.
+
+CERCA_RESULT_LIMIT_PER_SOURCE = 5
+
+
+def _parse_cerca_query(arg):
+    """Split user input into (title, year_or_None). Accepts trailing 4-digit
+    year, with or without parentheses: 'Il Ciclone 1996', 'Il Ciclone (1996)'.
+    Falls back to (arg, None) when no year token is recognised."""
+    if not arg:
+        return ("", None)
+    cleaned = arg.strip()
+    paren_match = re.search(r"\((\d{4})\)\s*$", cleaned)
+    if paren_match:
+        year = int(paren_match.group(1))
+        title = cleaned[: paren_match.start()].strip()
+        return (title, year)
+    parts = cleaned.rsplit(None, 1)
+    if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+        return (parts[0].strip(), int(parts[1]))
+    return (cleaned, None)
+
+
+def _cerca_film_hash(film_dict):
+    return str(abs(hash(("cerca", film_dict.get("tmdb_id"), film_dict.get("title"), film_dict.get("year")))))[:8]
+
+
+def _parallel_search_sources(title, year):
+    """Run archive.org + YouTube searches in parallel. Both calls degrade to
+    [] on error; never raises. Returns (archive_results, youtube_results)."""
+    query = f"{title} {year}".strip() if year else title
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_archive = pool.submit(search_archive_org, title, year, CERCA_RESULT_LIMIT_PER_SOURCE)
+        f_youtube = pool.submit(search_youtube, query, CERCA_RESULT_LIMIT_PER_SOURCE)
+        archive_results = []
+        youtube_results = []
+        for fut in as_completed([f_archive, f_youtube]):
+            try:
+                value = fut.result()
+            except Exception as e:
+                log.warning(f"  /cerca source error: {e}")
+                value = []
+            if fut is f_archive:
+                archive_results = value or []
+            else:
+                youtube_results = value or []
+    return archive_results, youtube_results
+
+
+def _annotate_youtube_quality(results):
+    """yt-dlp's flat-playlist mode doesn't expose resolution, so we cannot
+    pre-filter by min height. Mark each entry with `quality_hint` derived from
+    the title keywords — best-effort; the badge is decorative only."""
+    out = []
+    for r in results:
+        title_lower = (r.get("title") or "").lower()
+        if any(tag in title_lower for tag in ("4k", "2160p")):
+            hint = "2160p"
+        elif "1080" in title_lower:
+            hint = "1080p"
+        elif "720" in title_lower:
+            hint = "720p"
+        elif "480" in title_lower or "360" in title_lower:
+            hint = "480p"
+        else:
+            hint = "?"
+        new = dict(r)
+        new["quality_hint"] = hint
+        out.append(new)
+    return out
+
+
+def _format_cerca_button(result):
+    """Compact, Telegram-safe inline-button label. Mirrors the user's UX brief:
+    `🎞 archive.org · 1080p · 1h35m · 1.2GB` and the YouTube counterpart."""
+    duration = _format_duration(result.get("duration_sec"))
+    if result["source"] == "archive":
+        size = _human_size(result.get("size")) if result.get("size") else "?"
+        ident = result.get("identifier") or ""
+        label = f"🎞 archive · {duration} · {size} · {ident[:20]}"
+    else:
+        hint = result.get("quality_hint") or "?"
+        title = (result.get("title") or "")[:30]
+        label = f"📺 YouTube · {hint} · {duration} · {title}"
+        if hint in ("480p", "?"):
+            label = f"⚠️ {label}"
+    return label[:80]
+
+
+def do_cerca_search(query, progress_msg_id=None):
+    """Step 1: resolve the title via TMDb (when available), then trigger a
+    parallel search on archive.org + YouTube. Surfaces the consolidated list as
+    inline buttons so the user can pick one."""
+    title, year = _parse_cerca_query(query)
+    if not title:
+        msg = "❌ Titolo mancante. Usa <code>/cerca titolo film [anno]</code>."
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    tmdb_id = None
+    canonical_title = title
+    canonical_year = year
+    if TMDB_API_KEY:
+        candidates = tmdb_search_movies(title, year=year, limit=1)
+        if candidates:
+            top = candidates[0]
+            tmdb_id = top.get("tmdb_id")
+            canonical_title = top.get("title") or title
+            canonical_year = top.get("year") or year
+
+    label = canonical_title + (f" ({canonical_year})" if canonical_year else "")
+    if progress_msg_id:
+        tg_edit_message(
+            progress_msg_id,
+            f"🔎 Cerco <b>{html.escape(label)}</b> su archive.org e YouTube…"
+        )
+
+    archive_results, youtube_results = _parallel_search_sources(canonical_title, canonical_year)
+    youtube_results = _annotate_youtube_quality(youtube_results)
+
+    if not archive_results and not youtube_results:
+        msg = (
+            f"❌ Nessun risultato trovato per <b>{html.escape(label)}</b> "
+            f"né su archive.org né su YouTube.\n"
+            f"Prova con un titolo diverso o aggiungi l'anno."
+        )
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    combined = []
+    for r in archive_results:
+        combined.append(r)
+    for r in youtube_results:
+        combined.append(r)
+
+    film_hash = _cerca_film_hash({"tmdb_id": tmdb_id, "title": canonical_title, "year": canonical_year})
+    requests_state = load_requests()
+    pending = requests_state.setdefault("pending_cerca", {})
+    pending[f"film:{film_hash}"] = {
+        "tmdb_id": tmdb_id,
+        "title": canonical_title,
+        "year": canonical_year,
+        "results": combined,
+        "ts": datetime.now().isoformat(),
+    }
+    save_requests(requests_state)
+
+    rows = []
+    for idx, r in enumerate(combined):
+        rows.append([{
+            "text": _format_cerca_button(r),
+            "callback_data": f"cerca_pick:{film_hash}:{idx}",
+        }])
+    rows.append([{"text": "❌ Annulla", "callback_data": f"cerca_cancel:{film_hash}"}])
+
+    warning = ""
+    if not archive_results:
+        warning = "\n⚠️ archive.org non ha restituito risultati."
+    elif not youtube_results:
+        warning = "\n⚠️ YouTube non ha restituito risultati."
+    body = (
+        f"🎬 <b>{html.escape(label)}</b>\n"
+        f"Trovati {len(combined)} risultati. Quale scarico?{warning}"
+    )
+    if progress_msg_id:
+        tg_edit_message(progress_msg_id, body, reply_markup={"inline_keyboard": rows})
+    else:
+        tg_send(body, reply_markup={"inline_keyboard": rows})
+
+
+def _render_cerca_confirm(film_hash, result_idx, progress_msg_id=None):
+    """Show the confirmation card for a single picked result before triggering
+    the actual download. Returns False if the session has expired."""
+    requests_state = load_requests()
+    entry = requests_state.get("pending_cerca", {}).get(f"film:{film_hash}")
+    if not entry:
+        return False
+    results = entry.get("results") or []
+    if not (0 <= result_idx < len(results)):
+        return False
+    r = results[result_idx]
+    label = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
+    duration = _format_duration(r.get("duration_sec"))
+    if r["source"] == "archive":
+        size = _human_size(r.get("size")) if r.get("size") else "?"
+        source_line = f"🎞 archive.org · <code>{html.escape(r.get('identifier') or '')}</code>"
+        size_line = f"💾 {size} · {duration}"
+        details_line = f"📁 {html.escape(r.get('file_name') or '')}"
+    else:
+        uploader = r.get("uploader") or "?"
+        hint = r.get("quality_hint") or "?"
+        warning = " ⚠️ <i>bassa qualità</i>" if hint in ("480p", "?") else ""
+        source_line = f"📺 YouTube · <i>{html.escape(uploader)}</i>"
+        size_line = f"📐 {hint} · {duration}{warning}"
+        details_line = f"🔗 <code>{html.escape(r.get('url') or '')}</code>"
+
+    body = (
+        f"🎬 <b>{html.escape(label)}</b>\n"
+        f"{source_line}\n"
+        f"{size_line}\n"
+        f"{details_line}\n\n"
+        f"<i>{html.escape(r.get('title') or '')[:200]}</i>"
+    )
+    rows = [
+        [{"text": "⬇️ Conferma download", "callback_data": f"cerca_grab:{film_hash}:{result_idx}"}],
+        [{"text": "↩️ Cambia fonte", "callback_data": f"cerca_back:{film_hash}"}],
+        [{"text": "❌ Annulla", "callback_data": f"cerca_cancel:{film_hash}"}],
+    ]
+    if progress_msg_id:
+        tg_edit_message(progress_msg_id, body, reply_markup={"inline_keyboard": rows})
+    else:
+        tg_send(body, reply_markup={"inline_keyboard": rows})
+    return True
+
+
+def _render_cerca_results_page(film_hash, progress_msg_id=None):
+    """Re-render the results list (used when the user clicks 'Cambia fonte')."""
+    requests_state = load_requests()
+    entry = requests_state.get("pending_cerca", {}).get(f"film:{film_hash}")
+    if not entry:
+        return False
+    results = entry.get("results") or []
+    label = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
+    rows = []
+    for idx, r in enumerate(results):
+        rows.append([{
+            "text": _format_cerca_button(r),
+            "callback_data": f"cerca_pick:{film_hash}:{idx}",
+        }])
+    rows.append([{"text": "❌ Annulla", "callback_data": f"cerca_cancel:{film_hash}"}])
+    body = (
+        f"🎬 <b>{html.escape(label)}</b>\n"
+        f"Trovati {len(results)} risultati. Quale scarico?"
+    )
+    if progress_msg_id:
+        tg_edit_message(progress_msg_id, body, reply_markup={"inline_keyboard": rows})
+    else:
+        tg_send(body, reply_markup={"inline_keyboard": rows})
+    return True
+
+
+def do_cerca_download(film_hash, result_idx, msg_id=None):
+    """Queue-worker entry point: download the picked result, remux to MKV,
+    install under /media/films. Reports progress in place via tg_edit_message.
+    All recoverable failures (network, encoder, disk) are surfaced as a
+    Telegram message instead of a stack trace."""
+    requests_state = load_requests()
+    entry = requests_state.get("pending_cerca", {}).get(f"film:{film_hash}")
+    if not entry:
+        if msg_id:
+            tg_edit_message(msg_id, "⚠️ Sessione scaduta. Rilancia <code>/cerca</code>.")
+        return
+
+    results = entry.get("results") or []
+    if not (0 <= result_idx < len(results)):
+        if msg_id:
+            tg_edit_message(msg_id, "⚠️ Risultato non valido. Rilancia <code>/cerca</code>.")
+        return
+
+    r = results[result_idx]
+    title = entry["title"]
+    year = entry.get("year")
+    label = title + (f" ({year})" if year else "")
+
+    # Use /tmp as the scratch dir so half-downloads never pollute /media/films.
+    tmp_dir = tempfile.mkdtemp(prefix="cerca_")
+    log.info(f"  /cerca: downloading '{label}' source={r['source']} → {tmp_dir}")
+
+    def render_dl_progress(downloaded, total):
+        if not msg_id:
+            return
+        if total:
+            bar = _progress_bar(downloaded, total)
+            tg_edit_message(
+                msg_id,
+                f"⬇️ Scarico <b>{html.escape(label)}</b>\n"
+                f"{bar}\n"
+                f"{_human_size(downloaded)} / {_human_size(total)}"
+            )
+
+    try:
+        if r["source"] == "archive":
+            ext = os.path.splitext(r.get("file_name") or "movie.mp4")[1] or ".mp4"
+            raw_path = os.path.join(tmp_dir, f"movie{ext}")
+            if msg_id:
+                tg_edit_message(
+                    msg_id,
+                    f"⬇️ Scarico <b>{html.escape(label)}</b> da archive.org…"
+                )
+            download_archive_org(r["url"], raw_path, progress_cb=render_dl_progress)
+        else:
+            if msg_id:
+                tg_edit_message(
+                    msg_id,
+                    f"⬇️ Scarico <b>{html.escape(label)}</b> da YouTube…"
+                )
+            raw_path = download_youtube(r["video_id"], tmp_dir)
+
+        if msg_id:
+            tg_edit_message(
+                msg_id,
+                f"🔄 Remux MKV per <b>{html.escape(label)}</b>…"
+            )
+        mkv_path = os.path.join(tmp_dir, "final.mkv")
+        if raw_path.endswith(".mkv"):
+            mkv_path = raw_path
+        else:
+            remux_to_mkv(raw_path, mkv_path)
+
+        if msg_id:
+            tg_edit_message(
+                msg_id,
+                f"📦 Installo in libreria <b>{html.escape(label)}</b>…"
+            )
+        final_path = install_to_library(mkv_path, title, year)
+
+        # Clear the pending entry; we don't keep cerca state around once the
+        # download is done.
+        rs = load_requests()
+        rs.get("pending_cerca", {}).pop(f"film:{film_hash}", None)
+        save_requests(rs)
+
+        if msg_id:
+            tg_edit_message(
+                msg_id,
+                f"✅ <b>{html.escape(label)}</b> pronto!\n"
+                f"📁 <code>{html.escape(final_path)}</code>\n"
+                f"Visibile su Emby/Jellyfin. I sub ITA arrivano al prossimo giro di scansione."
+            )
+    except CercaDownloadError as e:
+        log.warning(f"  /cerca download failed for '{label}': {e}")
+        if msg_id:
+            tg_edit_message(
+                msg_id,
+                f"❌ Download fallito per <b>{html.escape(label)}</b>:\n"
+                f"<code>{html.escape(str(e))}</code>"
+            )
+    except Exception as e:
+        log.error(f"  /cerca unexpected error for '{label}': {e}", exc_info=True)
+        if msg_id:
+            tg_edit_message(
+                msg_id,
+                f"❌ Errore inatteso durante <b>{html.escape(label)}</b>:\n"
+                f"<code>{html.escape(str(e))[:200]}</code>"
+            )
+    finally:
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def do_retranslate(query, state, progress_msg_id=None):
     """Force re-translation of all .it.srt matching `query`:
     delete the existing .it.srt, then run the standard translate-prep flow
@@ -4302,14 +5141,41 @@ def _cmd_ita(arg, state, excludes):
     _cmd_scarica(f"{cleaned} --lang ITA".strip(), state, excludes)
 
 
-def _cmd_cerca(arg, state, excludes):
+def _cmd_sub(arg, state, excludes):
+    """Manual sub search across the local library. Used to be exposed as
+    /cerca; now /cerca is the multi-source film downloader and library search
+    keeps a dedicated /sub canonical (still discoverable via free text)."""
     if not arg:
         tg_send(
-            "Usa: <code>/cerca nome film o serie</code>\n"
+            "Usa: <code>/sub nome film o serie</code>\n"
             "Oppure scrivi semplicemente il nome senza slash."
         )
         return
     search_and_offer(arg, state)
+
+
+def _cmd_cerca(arg, state, excludes):
+    """Multi-source film download. TMDb disambiguation, then a parallel search
+    on archive.org + YouTube. Picked result is downloaded, remuxed to MKV and
+    installed under /media/films so Emby/Jellyfin pick it up automatically."""
+    if not arg:
+        tg_send(
+            "Usa: <code>/cerca titolo film [anno]</code>\n"
+            "Es: <code>/cerca Il Ciclone 1996</code>\n"
+            "Cerca su archive.org e YouTube e ti propone i risultati."
+        )
+        return
+    pos = queue_position()
+    result = tg_send(
+        f"🔎 Cerco <b>{html.escape(arg)}</b> su TMDb…"
+        + (f"\n⏳ Posizione {pos + 1}" if pos > 0 else "")
+    )
+    msg_id = result["result"]["message_id"] if result and result.get("ok") else None
+    download_queue.put({
+        "type": "cerca_search",
+        "query": arg,
+        "msg_id": msg_id,
+    })
 
 
 def _cmd_coda(arg, state, excludes):
@@ -4409,9 +5275,12 @@ def _cmd_falliti(arg, state, excludes):
 # `group` controls the section in /aiuto.
 COMMANDS = [
     # Search & download
-    {"canonical": "/cerca", "aliases": ["/search", "/sub"], "handler": _cmd_cerca,
+    {"canonical": "/sub", "aliases": [], "handler": _cmd_sub,
      "group": "Cerca & scarica", "args": "<nome>",
      "desc": "Cerca nella libreria (o scrivi direttamente il nome senza slash)"},
+    {"canonical": "/cerca", "aliases": ["/search", "/find"], "handler": _cmd_cerca,
+     "group": "Cerca & scarica", "args": "<titolo [anno]>",
+     "desc": "Cerca un film su archive.org + YouTube e lo scarica in /media/films"},
     {"canonical": "/scarica", "aliases": ["/download", "/req"], "handler": _cmd_scarica,
      "group": "Cerca & scarica", "args": "<nome [anno]> [--lang CODE]",
      "desc": "Richiedi un nuovo film via Radarr: scegli il rilascio (qualità, lingua, indexer). Senza --lang, default = lingua originale TMDb"},
@@ -4722,6 +5591,63 @@ def process_callbacks(state, excludes):
                             f"{lang_line}"
                             f"Ti avviso quando arriva il file + sub ITA."
                         )
+                    continue
+
+                continue
+
+            # /cerca callbacks: result pick, back-to-list, grab confirm, cancel.
+            # data format: `cerca_<action>:<film_hash>[:<result_idx>]`.
+            if action in ("cerca_pick", "cerca_back", "cerca_grab", "cerca_cancel"):
+                _, _, rest = data.partition(":")
+                pieces = rest.split(":")
+                film_hash = pieces[0] if pieces else ""
+
+                if action == "cerca_cancel":
+                    tg_answer_callback(cb_id, "❌ Annullato")
+                    if msg_id:
+                        tg_edit_message(msg_id, "❌ Richiesta annullata.")
+                    rs = load_requests()
+                    rs.get("pending_cerca", {}).pop(f"film:{film_hash}", None)
+                    save_requests(rs)
+                    continue
+
+                if action == "cerca_back":
+                    tg_answer_callback(cb_id, "")
+                    _render_cerca_results_page(film_hash, progress_msg_id=msg_id)
+                    continue
+
+                if action == "cerca_pick" and len(pieces) >= 2:
+                    try:
+                        result_idx = int(pieces[1])
+                    except ValueError:
+                        tg_answer_callback(cb_id, "⚠️ Errore")
+                        continue
+                    if not _render_cerca_confirm(film_hash, result_idx, progress_msg_id=msg_id):
+                        tg_answer_callback(cb_id, "⚠️ Sessione scaduta")
+                    else:
+                        tg_answer_callback(cb_id, "")
+                    continue
+
+                if action == "cerca_grab" and len(pieces) >= 2:
+                    try:
+                        result_idx = int(pieces[1])
+                    except ValueError:
+                        tg_answer_callback(cb_id, "⚠️ Errore")
+                        continue
+                    rs = load_requests()
+                    entry = rs.get("pending_cerca", {}).get(f"film:{film_hash}")
+                    if not entry or not (0 <= result_idx < len(entry.get("results") or [])):
+                        tg_answer_callback(cb_id, "⚠️ Sessione scaduta")
+                        if msg_id:
+                            tg_edit_message(msg_id, "⚠️ Sessione scaduta. Rilancia <code>/cerca</code>.")
+                        continue
+                    tg_answer_callback(cb_id, "⬇️ Avvio")
+                    download_queue.put({
+                        "type": "cerca_download",
+                        "film_hash": film_hash,
+                        "result_idx": result_idx,
+                        "msg_id": msg_id,
+                    })
                     continue
 
                 continue
@@ -5618,6 +6544,17 @@ def _queue_worker(state_ref):
                 lang_source = job.get("lang_source")
                 log.info(f"  Queue: scarica '{query}' lang={lang} source={lang_source}")
                 do_scarica_search(query, progress_msg_id=msg_id, lang=lang, lang_source=lang_source)
+            elif job_type == "cerca_search":
+                query = job["query"]
+                msg_id = job.get("msg_id")
+                log.info(f"  Queue: cerca_search '{query}'")
+                do_cerca_search(query, progress_msg_id=msg_id)
+            elif job_type == "cerca_download":
+                film_hash = job["film_hash"]
+                result_idx = job["result_idx"]
+                msg_id = job.get("msg_id")
+                log.info(f"  Queue: cerca_download film_hash={film_hash} idx={result_idx}")
+                do_cerca_download(film_hash, result_idx, msg_id=msg_id)
             elif job_type == "scarica_redo":
                 msg_id = job.get("msg_id")
                 log.info(
