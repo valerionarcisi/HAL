@@ -1467,7 +1467,127 @@ def extract_lang_flag(text):
     return cleaned, code, raw
 
 
-def score_release_language_confidence(release, target_code):
+# -----------------------------------------------------------------------------
+# Indexer audio scrapers
+# -----------------------------------------------------------------------------
+# When the release-name parser cannot disambiguate (MULTi alone, DUAL+X, etc.)
+# we may probe the indexer's public metadata for the actual audio-track list.
+# All scrapers are best-effort: any network/parse failure returns None and the
+# caller falls back to the parser score. A successful scrape returns a SET of
+# 3-letter codes from LANGUAGE_REGISTRY plus a special "_UNKNOWN" sentinel when
+# at least one audio track was named with a language we cannot map (so we know
+# the scrape worked but we lack a mapping).
+
+_SCRAPE_TIMEOUT = 8  # seconds, hard cap
+
+
+def _scrape_audio_from_mediainfo_text(text):
+    """Parse a MediaInfo / NFO-style dump and extract audio-track languages.
+
+    Looks for `Audio` lines or `Language : <X>` entries and maps token words
+    back to LANGUAGE_REGISTRY codes via _TOKEN_TO_CODE. Returns a set of
+    3-letter codes (possibly empty if no audio info present)."""
+    if not text:
+        return set()
+    found = set()
+    # `Audio ... : English E-AC-3 5.1 / French E-AC-3 5.1`
+    # `Audio: Italian AC3`
+    # `Language       : Italian`
+    # NFO/MediaInfo dumps often decorate lines with leading punctuation/ASCII art
+    # (e.g. "  . Audio ... :"), so accept any non-alpha leader before the keyword.
+    patterns = [
+        re.compile(r"^[^A-Za-z\n]*Audio[^:]*:\s*(.+)$", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^[^A-Za-z\n]*Language[^:]*:\s*(.+)$", re.IGNORECASE | re.MULTILINE),
+    ]
+    for pat in patterns:
+        for match in pat.finditer(text):
+            payload = match.group(1)
+            # Split on common track separators (/, |, ,, +) and whitespace.
+            words = re.findall(r"[A-Za-z]+", payload)
+            for w in words:
+                up = w.upper()
+                code = _TOKEN_TO_CODE.get(up)
+                if code and code not in {"MULTI", "DUAL"}:
+                    found.add(code)
+    return found
+
+
+def _scrape_audio_tpb(info_url):
+    """Pirate Bay description scraper via apibay.org JSON API.
+
+    `info_url` is the Radarr-supplied URL, e.g.
+    `https://thepiratebay.org/description.php?id=47222815`. Extracts the torrent
+    id and queries `https://apibay.org/t.php?id=<id>` for structured metadata
+    (which includes the upload `descr` field that often embeds MediaInfo)."""
+    m = re.search(r"[?&]id=(\d+)", info_url or "")
+    if not m:
+        return None
+    tid = m.group(1)
+    api_url = f"https://apibay.org/t.php?id={tid}"
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=_SCRAPE_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        descr = payload.get("descr") or ""
+        return _scrape_audio_from_mediainfo_text(descr)
+    except Exception as e:
+        log.debug(f"  tpb scrape failed for id={tid}: {e}")
+        return None
+
+
+def _scrape_audio_generic(info_url):
+    """Generic HTML scraper: GET the info_url and run the MediaInfo regex on the
+    raw response. Best-effort, may not work for sites that gate behind JS or
+    auth."""
+    if not info_url:
+        return None
+    try:
+        req = urllib.request.Request(info_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=_SCRAPE_TIMEOUT) as resp:
+            html = resp.read(200_000).decode("utf-8", errors="replace")
+        found = _scrape_audio_from_mediainfo_text(html)
+        return found if found else None
+    except Exception as e:
+        log.debug(f"  generic scrape failed for {info_url}: {e}")
+        return None
+
+
+def scrape_release_audio_languages(release):
+    """Best-effort: probe the release's indexer page for the real audio-track
+    list. Returns a set of 3-letter codes, or None when no scraper applies or
+    the probe failed."""
+    info_url = release.get("infoUrl") or ""
+    if not info_url:
+        return None
+    # Dispatch by hostname.
+    if "thepiratebay" in info_url or "/piratebay" in info_url:
+        result = _scrape_audio_tpb(info_url)
+        if result is not None:
+            return result
+    # Generic fallback for other indexers that expose audio in plain HTML.
+    return _scrape_audio_generic(info_url)
+
+
+# In-process cache: maps release infoHash to a set of audio language codes (or
+# None when the scrape failed). Keeps the picker snappy when a user paginates
+# back and forth or runs `/scarica` twice on the same film.
+_AUDIO_SCRAPE_CACHE = {}
+
+
+def get_release_audio_languages(release):
+    """Cached wrapper around `scrape_release_audio_languages`. Keyed by infoHash
+    (or guid as a fallback) so repeat lookups within one process do not hit
+    the network."""
+    key = release.get("infoHash") or release.get("guid")
+    if key in _AUDIO_SCRAPE_CACHE:
+        return _AUDIO_SCRAPE_CACHE[key]
+    result = scrape_release_audio_languages(release)
+    if key:
+        _AUDIO_SCRAPE_CACHE[key] = result
+    return result
+
+
+def score_release_language_confidence(release, target_code, allow_scrape=True):
     """Return a confidence score 0..1000 that `release` contains an audio track
     in `target_code`. Higher = more likely. Returns None when the release
     cannot plausibly contain the target (e.g. ENG-only release with target=ITA).
@@ -1476,7 +1596,7 @@ def score_release_language_confidence(release, target_code):
 
     Score scale:
       1000  target_code explicitly declared in the release title or Radarr
-            languages array
+            languages array, OR confirmed by indexer audio scrape
        600  MULTI marker alone, no other concrete language declared. MULTI
             typically means 3+ audio tracks; the target has a real chance.
        500  DUAL marker alone, no other concrete language declared. DUAL means
@@ -1487,8 +1607,18 @@ def score_release_language_confidence(release, target_code):
        200  DUAL + another concrete language declared. DUAL only has 2 tracks
             and one is already not the target → low odds but not impossible
             (rare mislabelled releases).
-       None Single-language release with a non-target language, or empty
-            detection (no language signal at all)."""
+       None Single-language release with a non-target language, empty
+            detection, OR indexer audio scrape proved the release does not
+            contain the target.
+
+    When `allow_scrape` is True (default) and the parser would assign a score
+    in the ambiguous 200..600 range, the function consults
+    `get_release_audio_languages` to look up the real audio-track list from
+    the indexer description page. If the scrape returns:
+      target in audio    → bumped to 1000 (confirmed)
+      audio non-empty
+        and target absent → dropped to None (refuted)
+      anything else      → keep the parser score (scrape inconclusive)."""
     if not target_code:
         return None
     langs = set(detect_release_languages(release))
@@ -1502,12 +1632,18 @@ def score_release_language_confidence(release, target_code):
     if not has_marker:
         return None
     if not concrete_others:
-        # Marker alone: ambiguous, may contain target.
-        return 600 if "MULTI" in langs else 500
-    # Marker + disclosed concrete language (not our target).
-    if "MULTI" in langs:
-        return 400
-    return 200
+        base = 600 if "MULTI" in langs else 500
+    elif "MULTI" in langs:
+        base = 400
+    else:
+        base = 200
+    if allow_scrape:
+        scraped = get_release_audio_languages(release)
+        if scraped:
+            if target_code in scraped:
+                return 1000
+            return None
+    return base
 
 
 def filter_releases_by_language(releases, target_code):
