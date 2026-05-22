@@ -1351,6 +1351,25 @@ LANGUAGE_REGISTRY = {
     "SPA": {"tokens": ["SPA", "ESP", "SPANISH", "CASTELLANO", "ES"], "tmdb_iso1": "es", "flag": "🇪🇸", "verify": False},
     "CHI": {"tokens": ["CHI", "CHN", "CHINESE", "MAN", "MANDARIN", "ZH"], "tmdb_iso1": "zh", "flag": "🇨🇳", "verify": False},
     "RUS": {"tokens": ["RUS", "RUSSIAN", "RU"], "tmdb_iso1": "ru", "flag": "🇷🇺", "verify": False},
+    "HIN": {"tokens": ["HIN", "HINDI"], "tmdb_iso1": "hi", "flag": "🇮🇳", "verify": False},
+    "POR": {"tokens": ["POR", "PORTUGUESE", "PORTUGUES", "BRA"], "tmdb_iso1": "pt", "flag": "🇵🇹", "verify": False},
+    "TUR": {"tokens": ["TUR", "TURKISH"], "tmdb_iso1": "tr", "flag": "🇹🇷", "verify": False},
+    "POL": {"tokens": ["POL", "POLISH"], "tmdb_iso1": "pl", "flag": "🇵🇱", "verify": False},
+    "ARA": {"tokens": ["ARA", "ARABIC"], "tmdb_iso1": "ar", "flag": "🇸🇦", "verify": False},
+    "HEB": {"tokens": ["HEB", "HEBREW"], "tmdb_iso1": "he", "flag": "🇮🇱", "verify": False},
+    "THA": {"tokens": ["THA", "THAI"], "tmdb_iso1": "th", "flag": "🇹🇭", "verify": False},
+    "NLD": {"tokens": ["NLD", "DUT", "DUTCH"], "tmdb_iso1": "nl", "flag": "🇳🇱", "verify": False},
+    "SWE": {"tokens": ["SWE", "SWEDISH"], "tmdb_iso1": "sv", "flag": "🇸🇪", "verify": False},
+    "DAN": {"tokens": ["DAN", "DANISH"], "tmdb_iso1": "da", "flag": "🇩🇰", "verify": False},
+    "NOR": {"tokens": ["NOR", "NORWEGIAN"], "tmdb_iso1": "no", "flag": "🇳🇴", "verify": False},
+    "FIN": {"tokens": ["FIN", "FINNISH"], "tmdb_iso1": "fi", "flag": "🇫🇮", "verify": False},
+    "HUN": {"tokens": ["HUN", "HUNGARIAN"], "tmdb_iso1": "hu", "flag": "🇭🇺", "verify": False},
+    "CZE": {"tokens": ["CZE", "CES", "CZECH"], "tmdb_iso1": "cs", "flag": "🇨🇿", "verify": False},
+    "RON": {"tokens": ["RON", "ROM", "ROMANIAN"], "tmdb_iso1": "ro", "flag": "🇷🇴", "verify": False},
+    "GRE": {"tokens": ["GRE", "ELL", "GREEK"], "tmdb_iso1": "el", "flag": "🇬🇷", "verify": False},
+    "UKR": {"tokens": ["UKR", "UKRAINIAN"], "tmdb_iso1": "uk", "flag": "🇺🇦", "verify": False},
+    "VIE": {"tokens": ["VIE", "VIETNAMESE"], "tmdb_iso1": "vi", "flag": "🇻🇳", "verify": False},
+    "IND": {"tokens": ["IND", "INDONESIAN"], "tmdb_iso1": "id", "flag": "🇮🇩", "verify": False},
     "MULTI": {"tokens": ["MULTI", "MULTILANG"], "tmdb_iso1": None, "flag": "🌐", "verify": True},
     "DUAL": {"tokens": ["DUAL", "DUALAUDIO"], "tmdb_iso1": None, "flag": "🎭", "verify": True},
 }
@@ -1449,23 +1468,30 @@ def extract_lang_flag(text):
 
 
 def filter_releases_by_language(releases, target_code):
-    """Keep only releases whose detected languages include `target_code`. Multi
-    and dual-audio releases pass the filter (they may contain the target track)
-    and are flagged for post-grab verification.
+    """Keep only releases whose detected languages include `target_code`. Releases
+    tagged MULTI or DUAL pass ONLY when no other concrete language is declared
+    alongside the marker (truly ambiguous — may contain the target). When a
+    concrete other language is present (e.g. `DUAL+ENG`, `MULTI+HIN`), the
+    release's other audio track is already disclosed and is not our target, so
+    the release is discarded.
 
     `target_code` is a normalized 3-letter ISO code from LANGUAGE_REGISTRY, or
     None (no filtering — returns the input unchanged)."""
     if not target_code:
         return list(releases)
+    markers = {"MULTI", "DUAL"}
     keep = []
     for rel in releases:
-        langs = detect_release_languages(rel)
+        langs = set(detect_release_languages(rel))
         if target_code in langs:
             keep.append(rel)
             continue
-        # Multi / dual-audio releases are kept under the assumption that they
-        # likely include the target language. Post-grab ffprobe verifies.
-        if "MULTI" in langs or "DUAL" in langs:
+        # Ambiguous marker alone (no other concrete lang declared) → keep for
+        # post-grab ffprobe verification. Marker with a declared other lang →
+        # the disclosed second track is not our target → skip.
+        has_marker = bool(langs & markers)
+        concrete_others = langs - markers
+        if has_marker and not concrete_others:
             keep.append(rel)
     return keep
 
