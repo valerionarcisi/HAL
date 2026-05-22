@@ -1467,33 +1467,64 @@ def extract_lang_flag(text):
     return cleaned, code, raw
 
 
+def score_release_language_confidence(release, target_code):
+    """Return a confidence score 0..1000 that `release` contains an audio track
+    in `target_code`. Higher = more likely. Returns None when the release
+    cannot plausibly contain the target (e.g. ENG-only release with target=ITA).
+
+    Heuristic, never authoritative — post-grab ffprobe is the final gate.
+
+    Score scale:
+      1000  target_code explicitly declared in the release title or Radarr
+            languages array
+       600  MULTI marker alone, no other concrete language declared. MULTI
+            typically means 3+ audio tracks; the target has a real chance.
+       500  DUAL marker alone, no other concrete language declared. DUAL means
+            exactly 2 tracks; one is unknown but could be the target.
+       400  MULTI + one or more other concrete languages declared. Still
+            plausible because MULTI usually exceeds 2 tracks even after the
+            disclosed ones, so the target may sit on an undisclosed track.
+       200  DUAL + another concrete language declared. DUAL only has 2 tracks
+            and one is already not the target → low odds but not impossible
+            (rare mislabelled releases).
+       None Single-language release with a non-target language, or empty
+            detection (no language signal at all)."""
+    if not target_code:
+        return None
+    langs = set(detect_release_languages(release))
+    if not langs:
+        return None
+    if target_code in langs:
+        return 1000
+    markers = {"MULTI", "DUAL"}
+    has_marker = bool(langs & markers)
+    concrete_others = langs - markers
+    if not has_marker:
+        return None
+    if not concrete_others:
+        # Marker alone: ambiguous, may contain target.
+        return 600 if "MULTI" in langs else 500
+    # Marker + disclosed concrete language (not our target).
+    if "MULTI" in langs:
+        return 400
+    return 200
+
+
 def filter_releases_by_language(releases, target_code):
-    """Keep only releases whose detected languages include `target_code`. Releases
-    tagged MULTI or DUAL pass ONLY when no other concrete language is declared
-    alongside the marker (truly ambiguous — may contain the target). When a
-    concrete other language is present (e.g. `DUAL+ENG`, `MULTI+HIN`), the
-    release's other audio track is already disclosed and is not our target, so
-    the release is discarded.
+    """Return releases that plausibly contain the target language, sorted by
+    descending language-confidence score (see `score_release_language_confidence`).
 
     `target_code` is a normalized 3-letter ISO code from LANGUAGE_REGISTRY, or
     None (no filtering — returns the input unchanged)."""
     if not target_code:
         return list(releases)
-    markers = {"MULTI", "DUAL"}
-    keep = []
+    scored = []
     for rel in releases:
-        langs = set(detect_release_languages(rel))
-        if target_code in langs:
-            keep.append(rel)
-            continue
-        # Ambiguous marker alone (no other concrete lang declared) → keep for
-        # post-grab ffprobe verification. Marker with a declared other lang →
-        # the disclosed second track is not our target → skip.
-        has_marker = bool(langs & markers)
-        concrete_others = langs - markers
-        if has_marker and not concrete_others:
-            keep.append(rel)
-    return keep
+        score = score_release_language_confidence(rel, target_code)
+        if score is not None:
+            scored.append((score, rel))
+    scored.sort(key=lambda pair: -pair[0])
+    return [rel for _, rel in scored]
 
 
 def _quality_rank(release):
@@ -1510,24 +1541,26 @@ def _quality_rank(release):
     return 0
 
 
-def rank_releases(releases, preferred=None):
+def rank_releases(releases, preferred=None, target_code=None):
     """Sort releases for the picker:
-      1) preferred-language match comes first
-      2) higher quality first
-      3) more seeders first
+      1) when `target_code` is set: higher language-confidence score first
+      2) preferred-language match comes first
+      3) higher quality first
+      4) more seeders first
     Non-destructive: returns a new list."""
     if preferred is None:
         preferred = RADARR_PREFERRED_LANGUAGES
 
     def key(r):
         langs = detect_release_languages(r)
-        # Index of the first preferred language we find in this release (lower = better).
-        # Releases without any preferred language go to the bottom.
         pref_idx = min(
             (preferred.index(l) for l in langs if l in preferred),
             default=len(preferred),
         )
         seeders = r.get("seeders") or 0
+        if target_code:
+            lang_score = score_release_language_confidence(r, target_code) or 0
+            return (-lang_score, pref_idx, -_quality_rank(r), -seeders)
         return (pref_idx, -_quality_rank(r), -seeders)
 
     return sorted(releases, key=key)
@@ -1561,10 +1594,16 @@ def _format_lang_filter_line(lang_code, lang_source):
     return f"🔤 Filtro: {spec['flag']} {lang_code}{suffix_part}\n"
 
 
-def format_release_button(release):
+def format_release_button(release, target_code=None):
     """Compact label for the inline button (Telegram limits ~64 chars but in
     practice ~80 is fine on most clients). The full title appears in the
-    confirmation card on the next step."""
+    confirmation card on the next step.
+
+    When `target_code` is provided, the label is prefixed with a confidence
+    marker reflecting how likely the release contains the target audio:
+      (no prefix)  explicit target match (score 1000)
+      ⚠️           ambiguous marker (MULTI/DUAL alone, score 500-600)
+      ❓           disclosed marker + other lang (score 200-400)"""
     langs = detect_release_languages(release)
     flag = _flag_for(langs)
     quality = ((release.get("quality") or {}).get("quality") or {}).get("name", "?")
@@ -1572,6 +1611,11 @@ def format_release_button(release):
     seeders = release.get("seeders") or 0
     lang_str = "+".join(langs[:2]) if langs != ["?"] else "?"
     label = f"{flag} {quality} · {size} · {lang_str} · {seeders}↑"
+    if target_code:
+        score = score_release_language_confidence(release, target_code)
+        if score is not None and score < 1000:
+            marker = "❓" if score < 500 else "⚠️"
+            label = f"{marker} {label}"
     rejected = release.get("rejections") or []
     if rejected:
         label = "🚫 " + label
@@ -3107,7 +3151,7 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
             tg_send(msg)
         return
 
-    ranked = rank_releases(filtered)
+    ranked = rank_releases(filtered, target_code=target_lang)
     # Strip Radarr's bulky fields we don't need to persist (full title list comments etc.)
     slim = []
     for r in ranked:
@@ -3209,7 +3253,7 @@ def do_scarica_redo(tmdb_id, title, year, lang, lang_source, excluded_guid, prog
             tg_send(msg)
         return
 
-    ranked = rank_releases(filtered)
+    ranked = rank_releases(filtered, target_code=lang)
     slim = []
     for r in ranked:
         slim.append({
@@ -3263,10 +3307,11 @@ def _render_release_page(film_hash, page, progress_msg_id=None):
     start = page * RELEASES_PER_PAGE
     chunk = releases[start:start + RELEASES_PER_PAGE]
 
+    target_code = entry.get("lang")
     rows = []
     for offset, rel in enumerate(chunk):
         global_idx = start + offset
-        label = format_release_button(rel)
+        label = format_release_button(rel, target_code=target_code)
         rows.append([{"text": label, "callback_data": f"radarr_rel:{film_hash}:{global_idx}"}])
 
     nav = []

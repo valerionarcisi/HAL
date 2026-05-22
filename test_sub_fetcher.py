@@ -2383,27 +2383,43 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
         rels = [self._rel("Movie.2024.ENG.1080p"), self._rel("Movie.2024.FRA.1080p")]
         self.assertEqual(sub_fetcher.filter_releases_by_language(rels, "JPN"), [])
 
-    def test_marker_with_other_concrete_lang_is_rejected(self):
-        # Regression: target=ITA should NOT keep a release tagged DUAL+HIN or
-        # MULTI+ENG. The marker alone is ambiguous, but when paired with a
-        # disclosed non-target language the "other side" is already known and
-        # is not Italian, so the release cannot contain ITA.
+    def test_marker_with_other_concrete_lang_is_kept_low_score(self):
+        # Soft filter: target=ITA keeps explicit ITA at top, then MULTI alone,
+        # then markers with other disclosed langs (lower confidence, still
+        # surfaced because MULTI/DUAL releases sometimes do contain ITA on an
+        # undisclosed track). ENG-only single-language releases are excluded.
         rels = [
             self._rel("Luca.2021.WEBRip.1080p.DUAL+HIN.x264"),
             self._rel("Luca.2021.WEBRip.720p.DUAL+ENG.x264"),
             self._rel("Luca.2021.WEBDL-1080p.ENG+MULTI.x264"),
             self._rel("Luca.2021.WEBRip.1080p.ITA.x264"),
             self._rel("Luca.2021.WEBRip.1080p.MULTi.x264"),
+            self._rel("Luca.2021.WEBRip.1080p.ENG.x264"),
         ]
         kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
         titles = [r["title"] for r in kept]
-        self.assertIn("Luca.2021.WEBRip.1080p.ITA.x264", titles)
-        # MULTI alone (no other concrete lang) → kept for post-grab verify
-        self.assertIn("Luca.2021.WEBRip.1080p.MULTi.x264", titles)
-        # Markers paired with non-target concrete langs → rejected
-        self.assertNotIn("Luca.2021.WEBRip.1080p.DUAL+HIN.x264", titles)
-        self.assertNotIn("Luca.2021.WEBRip.720p.DUAL+ENG.x264", titles)
-        self.assertNotIn("Luca.2021.WEBDL-1080p.ENG+MULTI.x264", titles)
+        # Order matters: ITA (1000) → MULTI alone (600) → MULTI+other (400) → DUAL+other (200)
+        self.assertEqual(titles[0], "Luca.2021.WEBRip.1080p.ITA.x264")
+        self.assertEqual(titles[1], "Luca.2021.WEBRip.1080p.MULTi.x264")
+        # MULTI+ENG comes before DUAL+anything
+        self.assertIn("Luca.2021.WEBDL-1080p.ENG+MULTI.x264", titles[:3])
+        # DUAL+other still surfaced (low score) but ENG-only is dropped
+        self.assertIn("Luca.2021.WEBRip.1080p.DUAL+HIN.x264", titles)
+        self.assertIn("Luca.2021.WEBRip.720p.DUAL+ENG.x264", titles)
+        self.assertNotIn("Luca.2021.WEBRip.1080p.ENG.x264", titles)
+
+    def test_score_levels_for_each_release_shape(self):
+        # Pin the confidence scale so future tweaks are intentional.
+        score = sub_fetcher.score_release_language_confidence
+        self.assertEqual(score(self._rel("Movie.ITA.1080p"), "ITA"), 1000)
+        self.assertEqual(score(self._rel("Movie.MULTi.1080p"), "ITA"), 600)
+        self.assertEqual(score(self._rel("Movie.DUAL.Audio.1080p"), "ITA"), 500)
+        self.assertEqual(score(self._rel("Movie.MULTi.ENG.1080p"), "ITA"), 400)
+        self.assertEqual(score(self._rel("Movie.DUAL.HIN.1080p"), "ITA"), 200)
+        self.assertIsNone(score(self._rel("Movie.ENG.1080p"), "ITA"))
+        self.assertIsNone(score(self._rel("Movie.FRA.1080p"), "ITA"))
+        # No-target → None
+        self.assertIsNone(score(self._rel("Movie.ITA.1080p"), None))
 
     def test_marker_with_target_explicit_is_kept(self):
         # MULTI+ITA and DUAL+ITA: target is explicitly disclosed → keep.
