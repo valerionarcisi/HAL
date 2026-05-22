@@ -2446,6 +2446,122 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
         self.assertEqual(titles, ["Movie.2024.ITA.BRRip.1080p"])
 
 
+class TestAudioMediaInfoParser(unittest.TestCase):
+    """Verify the MediaInfo-style text parser used by all scrapers."""
+
+    def test_pirate_bay_real_descr(self):
+        # Verbatim sample from apibay.org for Luca.2021.MULTi.1080p.WEB.H264-LOST
+        text = "  . Audio ... : English E-AC-3 5.1 / French E-AC-3 5.1\n  . Subs .... : Forced Srt / French Srt / English Srt"
+        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        self.assertEqual(found, {"ENG", "FRA"})
+
+    def test_italian_mediainfo_block(self):
+        text = "Audio: Italian AC3 5.1 / English DTS"
+        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        self.assertEqual(found, {"ITA", "ENG"})
+
+    def test_language_field_only(self):
+        text = "Format    : Matroska\nLanguage  : Italian\nLanguage  : English"
+        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        self.assertEqual(found, {"ITA", "ENG"})
+
+    def test_no_audio_info(self):
+        text = "Just a generic description with no track info."
+        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        self.assertEqual(found, set())
+
+    def test_empty_input(self):
+        self.assertEqual(sub_fetcher._scrape_audio_from_mediainfo_text(""), set())
+        self.assertEqual(sub_fetcher._scrape_audio_from_mediainfo_text(None), set())
+
+    def test_markers_are_filtered_out(self):
+        # The parser must never return MULTI/DUAL as a resolved language.
+        text = "Audio: MULTI 5.1\nLanguage: DUAL"
+        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        self.assertEqual(found, set())
+
+
+class TestScoreWithScrape(unittest.TestCase):
+    """Verify score_release_language_confidence uses scrape results to refine
+    ambiguous (200..600) parser scores."""
+
+    def setUp(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def tearDown(self):
+        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+
+    def _rel(self, title, info_hash="h1"):
+        return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
+                "infoHash": info_hash}
+
+    def test_scrape_confirms_target_bumps_to_1000(self):
+        rel = self._rel("Movie.MULTi.1080p.WEB")
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
+        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        self.assertEqual(score, 1000)
+
+    def test_scrape_refutes_target_drops_to_none(self):
+        # Exact scenario from the screenshot: MULTi release that the parser
+        # would rate 400 (MULTI+ENG), but TPB descr says audio = ENG+FRA only.
+        rel = self._rel("Luca.2021.MULTi.1080p.WEB.H264-LOST")
+        rel["languages"] = [{"id": 1, "name": "English"}]
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "FRA"}
+        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        self.assertIsNone(score)
+
+    def test_scrape_empty_set_keeps_parser_score(self):
+        # Empty set (cached as set()) means scrape ran but found no audio info.
+        # The parser score (here 600 for MULTi alone) is retained.
+        rel = self._rel("Movie.MULTi.1080p")
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = set()
+        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        self.assertEqual(score, 600)
+
+    def test_scrape_none_keeps_parser_score(self):
+        # Scrape failed (network error, no api etc). Cache stores None.
+        rel = self._rel("Movie.MULTi.1080p")
+        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None
+        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        self.assertEqual(score, 600)
+
+    def test_explicit_match_skips_scrape(self):
+        # If parser already says target=ITA explicitly, the scrape is not
+        # consulted (and not even cached). Score is 1000.
+        rel = self._rel("Movie.ITA.1080p")
+        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        self.assertEqual(score, 1000)
+
+    def test_allow_scrape_false_keeps_parser_score(self):
+        rel = self._rel("Movie.MULTi.ENG.1080p")
+        rel["languages"] = [{"id": 1, "name": "English"}]
+        score = sub_fetcher.score_release_language_confidence(rel, "ITA", allow_scrape=False)
+        self.assertEqual(score, 400)
+
+
+class TestTpbScraperIdExtraction(unittest.TestCase):
+    """Verify the TPB scraper correctly extracts the torrent id from the URL
+    Radarr supplies and makes the expected apibay request."""
+
+    def test_extracts_id_from_url(self):
+        from unittest.mock import patch, MagicMock
+        sample = '{"descr": "Audio: Italian AC3 / English DTS"}'
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = sample.encode()
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=mock_resp) as up:
+            found = sub_fetcher._scrape_audio_tpb("https://thepiratebay.org/description.php?id=47222815")
+            args, _ = up.call_args
+            req = args[0]
+            self.assertIn("apibay.org/t.php?id=47222815", req.full_url)
+        self.assertEqual(found, {"ITA", "ENG"})
+
+    def test_returns_none_when_no_id(self):
+        found = sub_fetcher._scrape_audio_tpb("https://thepiratebay.org/random/path")
+        self.assertIsNone(found)
+
+
 class TestTmdbOriginalLanguageByTmdbId(unittest.TestCase):
     """Verify the new TMDb helper returns the original_language field and
     handles missing keys / unreachable network."""
