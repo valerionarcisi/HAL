@@ -3992,7 +3992,7 @@ class TestRenderCercaConfirm(unittest.TestCase):
         self.assertTrue(ok)
         body, _ = edits[0]
         self.assertIn("480p", body)
-        self.assertIn("bassa qualità", body)
+        self.assertIn("Bassa qualità", body)
 
     def test_expired_session_returns_false(self):
         from unittest.mock import patch
@@ -4026,3 +4026,379 @@ class TestFormatCercaButton(unittest.TestCase):
             "duration_sec": 5700, "quality_hint": "480p",
         })
         self.assertTrue(label.startswith("⚠️"))
+
+
+# =============================================================================
+# /cerca bug-fix follow-up — fix/cerca-bugs
+#   resolution extraction, scoring, idempotency, retry, error UX
+# =============================================================================
+
+
+class TestExtractResolutionFromArchiveMetadata(unittest.TestCase):
+    """Bug 1 — archive.org metadata sometimes exposes width/height directly,
+    other times only an embedded WxH inside the format string, other times
+    only a bitrate. Cover all four paths."""
+
+    def test_explicit_height_picks_1080p(self):
+        label = sub_fetcher._extract_resolution_from_archive_metadata(
+            {"name": "x.mp4", "height": 1080, "width": 1920}
+        )
+        self.assertEqual(label, "1080p")
+
+    def test_explicit_height_picks_2160p(self):
+        label = sub_fetcher._extract_resolution_from_archive_metadata(
+            {"name": "x.mp4", "height": 2160}
+        )
+        self.assertEqual(label, "2160p")
+
+    def test_height_below_lowest_bucket_returns_none(self):
+        label = sub_fetcher._extract_resolution_from_archive_metadata(
+            {"name": "x.mp4", "height": 240}
+        )
+        self.assertIsNone(label)
+
+    def test_embedded_dimensions_in_format(self):
+        label = sub_fetcher._extract_resolution_from_archive_metadata(
+            {"name": "x.mp4", "format": "h.264 1280x720"}
+        )
+        self.assertEqual(label, "720p")
+
+    def test_keyword_fallback_in_name(self):
+        label = sub_fetcher._extract_resolution_from_archive_metadata(
+            {"name": "movie.1080p.mp4", "format": "h264"}
+        )
+        self.assertEqual(label, "1080p")
+
+    def test_bitrate_fallback_high(self):
+        label = sub_fetcher._extract_resolution_from_archive_metadata(
+            {"name": "x.mp4", "bitrate": 6000}
+        )
+        self.assertEqual(label, "1080p")
+
+    def test_bitrate_fallback_medium(self):
+        label = sub_fetcher._extract_resolution_from_archive_metadata(
+            {"name": "x.mp4", "bitrate": 2500}
+        )
+        self.assertEqual(label, "720p")
+
+    def test_no_metadata_returns_none(self):
+        label = sub_fetcher._extract_resolution_from_archive_metadata({"name": "x.mp4"})
+        self.assertIsNone(label)
+
+    def test_non_dict_returns_none(self):
+        self.assertIsNone(sub_fetcher._extract_resolution_from_archive_metadata(None))
+        self.assertIsNone(sub_fetcher._extract_resolution_from_archive_metadata("string"))
+
+
+class TestEnrichYoutubeResolution(unittest.TestCase):
+    """Bug 1 — verify the yt-dlp probe path parses the print template and
+    attaches resolution_label to the corresponding result dict."""
+
+    def _runner(self, stdout="", returncode=0):
+        def runner(cmd, capture_output=True, text=True, timeout=None):
+            class P: pass
+            p = P()
+            p.stdout = stdout
+            p.stderr = ""
+            p.returncode = returncode
+            return p
+        return runner
+
+    def test_parses_height_and_attaches_label(self):
+        runner = self._runner(stdout="1080|22|524288000\n")
+        payload = sub_fetcher._enrich_youtube_resolution("abc123", runner=runner)
+        self.assertEqual(payload["height"], 1080)
+        self.assertEqual(payload["format_id"], "22")
+        self.assertEqual(payload["filesize_approx"], 524288000)
+
+    def test_yt_dlp_failure_returns_none(self):
+        runner = self._runner(returncode=1)
+        payload = sub_fetcher._enrich_youtube_resolution("abc123", runner=runner)
+        self.assertIsNone(payload)
+
+    def test_enrich_pipeline_sets_resolution_label(self):
+        results = [
+            {"source": "youtube", "video_id": "aaa", "title": "Movie", "duration_sec": 5400},
+            {"source": "youtube", "video_id": "bbb", "title": "Movie", "duration_sec": 5400},
+        ]
+        runner = self._runner(stdout="720|18|209715200\n")
+        sub_fetcher._enrich_youtube_results(results, runner=runner, max_probe=2, max_workers=1)
+        self.assertEqual(results[0]["resolution_label"], "720p")
+        self.assertEqual(results[1]["resolution_label"], "720p")
+
+
+class TestScoreResult(unittest.TestCase):
+    """Bug 5 + 6 — penalty patterns + sort ordering."""
+
+    def test_clean_archive_1080p_scores_positive(self):
+        result = {
+            "source": "archive", "title": "Night Of The Living Dead",
+            "identifier": "nightofthelivingdead1968",
+            "resolution_label": "1080p", "size": 900 * 1024 * 1024,
+            "duration_sec": 5400,
+        }
+        score = sub_fetcher.score_result(result, tmdb_runtime_min=96)
+        self.assertGreater(score, 50)
+
+    def test_rescore_penalty_keeps_positive_but_lower_than_clean(self):
+        rescored = {
+            "source": "archive", "title": "Night Of The Living Dead Rescored",
+            "identifier": "nightofthelivingdeadrescore",
+            "resolution_label": "1080p", "size": 900 * 1024 * 1024,
+            "duration_sec": 5400,
+        }
+        clean = {
+            "source": "archive", "title": "Night Of The Living Dead",
+            "identifier": "nightofthelivingdead1968",
+            "resolution_label": "1080p", "size": 900 * 1024 * 1024,
+            "duration_sec": 5400,
+        }
+        rescored_score = sub_fetcher.score_result(rescored, tmdb_runtime_min=96)
+        clean_score = sub_fetcher.score_result(clean, tmdb_runtime_min=96)
+        self.assertGreater(clean_score, rescored_score)
+        self.assertLess(rescored_score, 0)
+
+    def test_trailer_is_excluded(self):
+        trailer = {
+            "source": "youtube", "title": "Night Of The Living Dead — Trailer",
+            "video_id": "xx", "duration_sec": 7200,
+        }
+        score = sub_fetcher.score_result(trailer)
+        self.assertLess(score, sub_fetcher._CERCA_EXCLUDE_SCORE_THRESHOLD)
+
+    def test_behind_the_scenes_is_excluded(self):
+        bts = {
+            "source": "youtube", "title": "Making Of Behind The Scenes Doc",
+            "video_id": "xx", "duration_sec": 7200,
+        }
+        score = sub_fetcher.score_result(bts)
+        self.assertLess(score, sub_fetcher._CERCA_EXCLUDE_SCORE_THRESHOLD)
+
+    def test_archive_scores_higher_than_youtube_all_else_equal(self):
+        a = {"source": "archive", "title": "Movie", "identifier": "movie",
+             "resolution_label": "720p", "size": 700 * 1024 * 1024,
+             "duration_sec": 5400}
+        y = {"source": "youtube", "title": "Movie", "video_id": "x",
+             "resolution_label": "720p", "duration_sec": 5400}
+        self.assertGreater(
+            sub_fetcher.score_result(a, tmdb_runtime_min=90),
+            sub_fetcher.score_result(y, tmdb_runtime_min=90),
+        )
+
+    def test_sort_orders_clean_before_rescored(self):
+        clean = {"source": "archive", "title": "Movie", "identifier": "movie",
+                 "resolution_label": "1080p", "size": 1024 * 1024 * 1024,
+                 "duration_sec": 5400}
+        rescore = {"source": "archive", "title": "Movie Rescored",
+                   "identifier": "movie_rescore",
+                   "resolution_label": "1080p", "size": 1024 * 1024 * 1024,
+                   "duration_sec": 5400}
+        yt = {"source": "youtube", "title": "Movie HD", "video_id": "x",
+              "resolution_label": "720p", "duration_sec": 5400}
+        items = [rescore, yt, clean]
+        items.sort(key=lambda r: sub_fetcher.score_result(r, tmdb_runtime_min=90), reverse=True)
+        self.assertEqual(items[0], clean)
+        self.assertEqual(items[-1], rescore)
+
+
+class TestCercaGrabIdempotency(unittest.TestCase):
+    """Bug 2 — `downloading_idx` field prevents a double-enqueue when the
+    user clicks 'Conferma download' twice. Drive the callback handler via
+    `_handle_cerca_grab_callback` indirectly through the saved state."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_req = sub_fetcher.REQUESTS_FILE
+        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+        rs = sub_fetcher.load_requests()
+        rs["pending_cerca"]["film:hashAAA"] = {
+            "title": "Night Of The Living Dead",
+            "year": 1968,
+            "results": [{
+                "source": "archive", "identifier": "ntld", "title": "NTLD",
+                "duration_sec": 5400, "size": 900 * 1024 * 1024,
+                "resolution_label": "1080p",
+                "url": "https://archive.org/x/ntld.mp4",
+                "file_name": "ntld.mp4",
+            }],
+            "downloading_idx": None,
+        }
+        sub_fetcher.save_requests(rs)
+
+    def tearDown(self):
+        sub_fetcher.REQUESTS_FILE = self._orig_req
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_first_grab_sets_downloading_idx(self):
+        rs = sub_fetcher.load_requests()
+        entry = rs["pending_cerca"]["film:hashAAA"]
+        # Simulate the guard logic of the callback handler.
+        self.assertIsNone(entry.get("downloading_idx"))
+        entry["downloading_idx"] = 0
+        sub_fetcher.save_requests(rs)
+        rs2 = sub_fetcher.load_requests()
+        self.assertEqual(rs2["pending_cerca"]["film:hashAAA"]["downloading_idx"], 0)
+
+    def test_release_resets_downloading_idx(self):
+        rs = sub_fetcher.load_requests()
+        rs["pending_cerca"]["film:hashAAA"]["downloading_idx"] = 0
+        sub_fetcher.save_requests(rs)
+        sub_fetcher._release_cerca_downloading_idx("hashAAA")
+        rs2 = sub_fetcher.load_requests()
+        self.assertIsNone(rs2["pending_cerca"]["film:hashAAA"]["downloading_idx"])
+
+    def test_release_on_missing_entry_is_noop(self):
+        # Should not raise even when the entry was cleared concurrently.
+        sub_fetcher._release_cerca_downloading_idx("notARealHash")
+        rs = sub_fetcher.load_requests()
+        self.assertIn("film:hashAAA", rs["pending_cerca"])
+
+
+class TestDownloadArchiveOrgRetry(unittest.TestCase):
+    """Bug 4 — transient 5xx errors are retried with exponential backoff.
+    Hard 404 / 403 fail immediately. `sleep_fn` is injected so the test runs
+    in milliseconds."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.dest = os.path.join(self.tmpdir, "movie.mp4")
+        self.sleeps = []
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _opener_factory(self, sequence):
+        """Each entry in `sequence` is either a callable that returns a fake
+        response context manager OR an Exception to be raised on that
+        attempt."""
+        from contextlib import contextmanager
+        items = list(sequence)
+
+        @contextmanager
+        def fake(url, timeout=None):
+            item = items.pop(0)
+            if isinstance(item, Exception):
+                raise item
+
+            class R:
+                def __init__(self, payload):
+                    self.payload = payload
+                    self.headers = {"Content-Length": str(len(payload))}
+                    self._consumed = False
+                def read(self, n=-1):
+                    if self._consumed:
+                        return b""
+                    self._consumed = True
+                    return self.payload
+
+            yield R(item)
+        return fake, items
+
+    def test_succeeds_after_two_5xx(self):
+        err = urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
+        opener, _ = self._opener_factory([err, err, b"FAKEPAYLOAD"])
+        path = sub_fetcher.download_archive_org(
+            "https://archive.org/x", self.dest,
+            opener=opener, sleep_fn=lambda s: self.sleeps.append(s),
+        )
+        self.assertEqual(path, self.dest)
+        self.assertEqual(self.sleeps, [2, 5])
+        with open(self.dest, "rb") as f:
+            self.assertEqual(f.read(), b"FAKEPAYLOAD")
+
+    def test_404_is_not_retried(self):
+        err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        opener, leftover = self._opener_factory([err, b"never used"])
+        with self.assertRaises(sub_fetcher.CercaDownloadError):
+            sub_fetcher.download_archive_org(
+                "https://archive.org/x", self.dest,
+                opener=opener, sleep_fn=lambda s: self.sleeps.append(s),
+            )
+        # `leftover` still has the unused payload because no retry happened.
+        self.assertEqual(len(leftover), 1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_5xx_exhausted_raises_cerca_error(self):
+        err = urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
+        opener, _ = self._opener_factory([err, err, err, err])
+        with self.assertRaises(sub_fetcher.CercaDownloadError):
+            sub_fetcher.download_archive_org(
+                "https://archive.org/x", self.dest,
+                opener=opener, sleep_fn=lambda s: self.sleeps.append(s),
+            )
+        # Three sleeps = 4 attempts total.
+        self.assertEqual(self.sleeps, [2, 5, 10])
+
+
+class TestCercaConfirmCardReadability(unittest.TestCase):
+    """Bug 7 — confirmation card shows the readable title (not the ugly
+    archive.org identifier slug) plus the director when TMDb provided one
+    plus a `⚠️ Possibilmente versione alternativa` line for rescored / fan
+    cuts."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = sub_fetcher.REQUESTS_FILE
+        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+
+    def tearDown(self):
+        sub_fetcher.REQUESTS_FILE = self._orig
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_card_uses_metadata_title_and_director(self):
+        from unittest.mock import patch
+        rs = sub_fetcher.load_requests()
+        rs["pending_cerca"]["film:abc12345"] = {
+            "title": "Night of the Living Dead",
+            "year": 1968,
+            "director": "George A. Romero",
+            "results": [{
+                "source": "archive",
+                "identifier": "nightofthelivingdeadrescoreofficialfullmoviecopy",
+                "title": "Night Of The Living Dead - Rescored",
+                "year": 1968,
+                "duration_sec": 5700,
+                "size": 870 * 1024 * 1024,
+                "file_name": "ntld_rescore.mp4",
+                "resolution_label": "1080p",
+                "url": "https://archive.org/x",
+            }],
+        }
+        sub_fetcher.save_requests(rs)
+        edits = []
+        with patch.object(sub_fetcher, "tg_edit_message",
+                          side_effect=lambda mid, body, reply_markup=None: edits.append((body, reply_markup))):
+            ok = sub_fetcher._render_cerca_confirm("abc12345", 0, progress_msg_id=11)
+        self.assertTrue(ok)
+        body, _ = edits[0]
+        self.assertIn("Regia: George A. Romero", body)
+        self.assertIn("Night Of The Living Dead - Rescored", body)
+        self.assertIn("rescored", body.lower())
+        # Resolution and source must be visible.
+        self.assertIn("1080p", body)
+        self.assertIn("archive.org", body)
+
+
+class TestFirstDirectorFromCredits(unittest.TestCase):
+    """Bug 7 — heuristic: pick the FIRST crew member whose job == 'Director'."""
+
+    def test_picks_first_director(self):
+        credits = {"crew": [
+            {"job": "Producer", "name": "Russell Streiner"},
+            {"job": "Director", "name": "George A. Romero"},
+            {"job": "Writer", "name": "John Russo"},
+        ]}
+        self.assertEqual(sub_fetcher._first_director_from_credits(credits), "George A. Romero")
+
+    def test_returns_none_on_no_director(self):
+        credits = {"crew": [{"job": "Producer", "name": "X"}]}
+        self.assertIsNone(sub_fetcher._first_director_from_credits(credits))
+
+    def test_returns_none_on_malformed_payload(self):
+        self.assertIsNone(sub_fetcher._first_director_from_credits(None))
+        self.assertIsNone(sub_fetcher._first_director_from_credits({}))
+        self.assertIsNone(sub_fetcher._first_director_from_credits({"crew": []}))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -489,6 +489,50 @@ def tmdb_search_movies(query, year=None, limit=5):
     return out
 
 
+def tmdb_get_movie_details(tmdb_id):
+    """Fetch additional details (runtime + first credited director) for a
+    TMDb movie. Used by /cerca to score result-duration coherence and to
+    render the director on the confirmation card. Returns a dict
+    {runtime_min, director} with either field set to None on partial
+    failure. Network failure → {runtime_min: None, director: None}."""
+    if not TMDB_API_KEY or not tmdb_id:
+        return {"runtime_min": None, "director": None}
+    detail_url = f"{TMDB_API_URL}/movie/{tmdb_id}?api_key={TMDB_API_KEY}"
+    credits_url = f"{TMDB_API_URL}/movie/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
+    runtime_min = None
+    director = None
+    try:
+        with urllib.request.urlopen(detail_url, timeout=10) as resp:
+            detail = json.loads(resp.read().decode("utf-8"))
+        rt = detail.get("runtime")
+        if isinstance(rt, (int, float)) and rt > 0:
+            runtime_min = int(rt)
+    except Exception as e:
+        log.debug(f"  TMDb movie detail error for {tmdb_id}: {e}")
+    try:
+        with urllib.request.urlopen(credits_url, timeout=10) as resp:
+            credits = json.loads(resp.read().decode("utf-8"))
+        director = _first_director_from_credits(credits)
+    except Exception as e:
+        log.debug(f"  TMDb credits error for {tmdb_id}: {e}")
+    return {"runtime_min": runtime_min, "director": director}
+
+
+def _first_director_from_credits(credits):
+    """Walk a TMDb /credits payload and return the first crew member whose
+    `job` is exactly 'Director'. Returns None if the list is empty or the
+    payload is malformed."""
+    if not isinstance(credits, dict):
+        return None
+    crew = credits.get("crew") or []
+    for member in crew:
+        if isinstance(member, dict) and (member.get("job") or "") == "Director":
+            name = (member.get("name") or "").strip()
+            if name:
+                return name
+    return None
+
+
 def tmdb_get_original_language(title, year=None, is_tv=False):
     """Return the original_language ISO-639-1 code from TMDb (e.g. 'it', 'en'),
     or None if the lookup fails. Uses the first search result, like
@@ -1368,6 +1412,203 @@ _YTDLP_PRINT_FIELDS = ["title", "id", "duration", "uploader"]
 _CERCA_MIN_DURATION_SEC = 60 * 60
 _CERCA_MAX_DURATION_SEC = 240 * 60
 
+# Penalty / bonus patterns applied to /cerca result titles (archive identifier
+# OR file name OR YouTube title — whatever we have to match against). The
+# tuple is (regex, score_delta, badge_label_or_None). Negative deltas indicate
+# "probably the wrong version" of the film (rescored, fan-edit, recut, trailer,
+# clip, behind-the-scenes, commentary). Positive deltas reward genuine cuts the
+# user is likely after (extended, director's cut). Results scoring below
+# `_CERCA_EXCLUDE_SCORE_THRESHOLD` are dropped from the picker entirely.
+_CERCA_PENALTY_PATTERNS = [
+    (r"\brescore[d]?\b", -500, "🎵 rescored"),
+    (r"\bfan[\s\-]?edit\b", -700, "✂️ fan edit"),
+    (r"\brecut\b", -400, "✂️ recut"),
+    (r"\btrailer\b", -2000, None),
+    (r"\bpreview\b", -1500, None),
+    (r"\bclip\b", -1500, None),
+    (r"\bscene\b", -1500, None),
+    (r"\bbehind[\s\-]?the[\s\-]?scenes\b", -2000, None),
+    (r"\bmaking[\s\-]?of\b", -2000, None),
+    (r"\bcommentary\b", -1500, None),
+    (r"\bcommento\b", -1500, None),
+    (r"\bextended\b", +100, "🎬 extended"),
+    (r"\bdirector'?s?[\s\-]?cut\b", +100, "🎬 director's cut"),
+]
+_CERCA_EXCLUDE_SCORE_THRESHOLD = -1500
+
+# Vertical pixel buckets used by `_height_to_resolution_label`. Anything from
+# >=2160 → 2160p, >=1080 → 1080p, etc. Single source of truth so archive.org
+# and YouTube enrichment use the same label vocabulary.
+_RESOLUTION_BUCKETS = (
+    (2160, "2160p"),
+    (1080, "1080p"),
+    (720, "720p"),
+    (480, "480p"),
+    (360, "360p"),
+)
+
+
+def _height_to_resolution_label(height):
+    """Map a vertical pixel count to a human label ('1080p', '720p'...).
+    Returns None if `height` is missing or below the lowest bucket. The
+    `4k`/`2160p` bucket subsumes anything taller (no separate 8K label by
+    design)."""
+    try:
+        h = int(height)
+    except (TypeError, ValueError):
+        return None
+    if h <= 0:
+        return None
+    for threshold, label in _RESOLUTION_BUCKETS:
+        if h >= threshold:
+            return label
+    return None
+
+
+def _extract_resolution_from_archive_metadata(file_entry):
+    """Inspect a single archive.org `files[]` entry and return the best
+    resolution label we can infer. The metadata is inconsistent: some items
+    expose `width`/`height` directly, others embed it in the `format` string
+    (e.g. 'h.264 IA', '512x384', 'MPEG4'), others have nothing. Returns None
+    when the resolution cannot be determined."""
+    if not isinstance(file_entry, dict):
+        return None
+    # Prefer explicit pixel dimensions when present.
+    label = _height_to_resolution_label(file_entry.get("height"))
+    if label:
+        return label
+    # Some derivatives expose a 'size' axis like '1280x720' inside `format` or
+    # an explicit `original` cross-reference; we parse both shapes.
+    for key in ("format", "name"):
+        raw = file_entry.get(key)
+        if not raw:
+            continue
+        m = re.search(r"(\d{3,4})\s*[xX]\s*(\d{3,4})", str(raw))
+        if m:
+            label = _height_to_resolution_label(m.group(2))
+            if label:
+                return label
+        # `4k` / `2160p` / `1080p` keyword fallback.
+        s = str(raw).lower()
+        if "2160p" in s or "4k" in s:
+            return "2160p"
+        if "1080p" in s:
+            return "1080p"
+        if "720p" in s:
+            return "720p"
+        if "480p" in s:
+            return "480p"
+        if "360p" in s:
+            return "360p"
+    # Bitrate-based fallback: ≥5 Mbps usually means 1080p+, 2-5 Mbps → 720p,
+    # 0.5-2 Mbps → 480p. Anything lower stays None (unknown).
+    try:
+        bitrate = float(file_entry.get("bitrate") or 0)
+    except (TypeError, ValueError):
+        bitrate = 0.0
+    if bitrate >= 5000:
+        return "1080p"
+    if bitrate >= 2000:
+        return "720p"
+    if bitrate >= 500:
+        return "480p"
+    return None
+
+
+def _score_for_text(text):
+    """Sum the penalty/bonus deltas for every `_CERCA_PENALTY_PATTERNS` match
+    in `text` and collect the matched labels. Returns (score, [labels...])."""
+    if not text:
+        return 0, []
+    delta = 0
+    labels = []
+    lower = str(text).lower()
+    for pattern, penalty, label in _CERCA_PENALTY_PATTERNS:
+        if re.search(pattern, lower):
+            delta += penalty
+            if label:
+                labels.append(label)
+    return delta, labels
+
+
+def _resolution_rank(label):
+    """Higher = better. Used by `score_result` to break ties."""
+    return {
+        "2160p": 4,
+        "1080p": 3,
+        "720p": 2,
+        "480p": 1,
+        "360p": 0,
+    }.get(label, -1)
+
+
+def _source_rank(source):
+    """archive.org > YouTube. Reflects download reliability, not content
+    quality."""
+    return {"archive": 2, "youtube": 1}.get(source, 0)
+
+
+def score_result(result, tmdb_runtime_min=None):
+    """Compute a sortable score for a /cerca result. Higher = show earlier.
+    The score is intentionally coarse: it combines penalty hits on the
+    identifier/title (Bug 5), source reliability, resolution, file size and
+    duration coherence with the TMDb-reported runtime. Tests pin every
+    component, so a future tweak does not silently regress the ordering."""
+    if not isinstance(result, dict):
+        return -10_000
+
+    title_text = " ".join(
+        str(result.get(k) or "") for k in ("title", "identifier", "file_name")
+    )
+    penalty, _labels = _score_for_text(title_text)
+    score = penalty
+
+    score += _source_rank(result.get("source")) * 50
+    score += _resolution_rank(result.get("resolution_label")) * 30
+
+    size = result.get("size") or 0
+    try:
+        size_gb = float(size) / (1024 ** 3)
+    except (TypeError, ValueError):
+        size_gb = 0.0
+    if size_gb > 0:
+        # Reward size up to 5 GB (better encodes / higher resolution); past
+        # that, suspect a non-standard source (full disc image, raw DV...).
+        if size_gb <= 5:
+            score += int(size_gb * 10)
+        else:
+            score += 50 - int((size_gb - 5) * 5)
+
+    duration = result.get("duration_sec")
+    if tmdb_runtime_min and duration:
+        try:
+            actual_min = int(duration) / 60
+            target = float(tmdb_runtime_min)
+            diff = abs(actual_min - target)
+            if diff <= 5:
+                score += 30
+            elif diff <= 15:
+                score += 10
+            elif actual_min < 60 or actual_min > 150:
+                score -= 30
+            elif diff > 30:
+                score -= 15
+        except (TypeError, ValueError):
+            pass
+
+    return score
+
+
+def _result_match_badges(result):
+    """Return the list of human-readable labels for any penalty/bonus pattern
+    that fired on this result's title/identifier. Used by the picker button
+    and confirmation card to flag rescored / fan-edit / extended versions."""
+    title_text = " ".join(
+        str(result.get(k) or "") for k in ("title", "identifier", "file_name")
+    )
+    _delta, labels = _score_for_text(title_text)
+    return labels
+
 
 def _parse_duration_to_seconds(raw):
     """Accept either an int/float (seconds), 'HH:MM:SS', 'MM:SS', or 'NNN'
@@ -1447,9 +1688,12 @@ def _archive_file_url(identifier, file_name):
 
 
 def _pick_best_archive_file(files):
-    """Given the file list of an archive.org item, return (name, size, fmt) for
-    the best video file we want to download. Prefers MP4, then MKV, then WEBM.
-    Returns None if no usable video is present."""
+    """Given the file list of an archive.org item, return a dict
+    {name, size, format, resolution_label} for the best video file we want to
+    download. Prefers MP4, then MKV, then WEBM. Returns None if no usable video
+    is present. The picked entry is the originating file so its `width`/
+    `height` / `format` / `bitrate` are forwarded to
+    `_extract_resolution_from_archive_metadata`."""
     if not files:
         return None
     candidates = []
@@ -1476,12 +1720,18 @@ def _pick_best_archive_file(files):
             4
         )
         # Bigger file = better encode in archive.org's world.
-        candidates.append((rank, -size, name, size, fmt))
+        candidates.append((rank, -size, name, size, fmt, entry))
     if not candidates:
         return None
-    candidates.sort()
-    _, _, name, size, fmt = candidates[0]
-    return {"name": name, "size": size, "format": fmt}
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+    _, _, name, size, fmt, entry = candidates[0]
+    resolution_label = _extract_resolution_from_archive_metadata(entry)
+    return {
+        "name": name,
+        "size": size,
+        "format": fmt,
+        "resolution_label": resolution_label,
+    }
 
 
 def search_archive_org(title, year=None, limit=10, opener=None):
@@ -1530,15 +1780,27 @@ def search_archive_org(title, year=None, limit=10, opener=None):
             ryear = int(str(ryear)[:4]) if ryear else None
         except (TypeError, ValueError):
             ryear = None
+        # Prefer the human-readable title from the /metadata payload over the
+        # ugly `identifier` slug. Both `metadata.title` (real metadata) and the
+        # search-doc `title` may be present; pick the metadata one when it
+        # looks meaningful (longer, has spaces).
+        meta_title_raw = (meta.get("metadata") or {}).get("title")
+        search_title = d.get("title") or ident
+        display_title = search_title
+        if meta_title_raw and isinstance(meta_title_raw, str):
+            meta_title = meta_title_raw.strip()
+            if meta_title and (" " in meta_title or len(meta_title) > len(search_title)):
+                display_title = meta_title
         results.append({
             "source": "archive",
             "identifier": ident,
-            "title": d.get("title") or ident,
+            "title": display_title,
             "year": ryear,
             "duration_sec": duration,
             "size": best["size"] or None,
             "file_name": best["name"],
             "format": best["format"],
+            "resolution_label": best.get("resolution_label"),
             "url": _archive_file_url(ident, best["name"]),
             "uploader": None,
         })
@@ -1559,6 +1821,86 @@ def _ytdlp_cookies_args():
     if YT_COOKIES_FILE and os.path.exists(YT_COOKIES_FILE):
         return ["--cookies", YT_COOKIES_FILE]
     return []
+
+
+def _enrich_youtube_resolution(video_id, runner=None, timeout=20):
+    """Probe a single YouTube video with `yt-dlp --skip-download --print
+    height|format_id|filesize_approx` to discover the resolution of its best
+    stream. Returns a dict {height, format_id, filesize_approx} on success or
+    None on any failure. Failure is silent because the picker is allowed to
+    fall back to '?' when enrichment cannot determine the resolution."""
+    if not video_id:
+        return None
+    import subprocess
+    runner = runner or subprocess.run
+    cmd = [
+        _ytdlp_binary(),
+        "--no-warnings",
+        "--skip-download",
+        "--no-playlist",
+        "--print", "%(height)s|%(format_id)s|%(filesize_approx)s",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ] + _ytdlp_cookies_args()
+    try:
+        proc = runner(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        log.debug(f"  yt-dlp probe failed for {video_id}: {e}")
+        return None
+    if proc.returncode != 0:
+        return None
+    for raw_line in (proc.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|", 2)
+        if len(parts) < 3:
+            continue
+        height_raw, format_id, filesize_raw = parts
+        try:
+            height = int(height_raw) if height_raw not in ("", "NA", "None") else None
+        except ValueError:
+            height = None
+        try:
+            filesize = int(filesize_raw) if filesize_raw not in ("", "NA", "None") else None
+        except ValueError:
+            filesize = None
+        return {
+            "height": height,
+            "format_id": format_id if format_id not in ("", "NA", "None") else None,
+            "filesize_approx": filesize,
+        }
+    return None
+
+
+def _enrich_youtube_results(results, runner=None, max_probe=5, max_workers=4):
+    """Run `_enrich_youtube_resolution` for the top-N candidates in parallel
+    and attach a `resolution_label` (and a `filesize_approx` when available)
+    to each enriched result. Slow yt-dlp probes are bounded by `max_probe`
+    to keep total picker latency under control; remaining results keep their
+    title-based hint."""
+    if not results:
+        return results
+    indices_to_probe = list(range(min(len(results), max_probe)))
+    if not indices_to_probe:
+        return results
+
+    def probe(idx):
+        return idx, _enrich_youtube_resolution(results[idx].get("video_id"), runner=runner)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for fut in as_completed([pool.submit(probe, i) for i in indices_to_probe]):
+            try:
+                idx, payload = fut.result()
+            except Exception:
+                continue
+            if not payload:
+                continue
+            label = _height_to_resolution_label(payload.get("height"))
+            if label:
+                results[idx]["resolution_label"] = label
+            if payload.get("filesize_approx"):
+                results[idx].setdefault("size", payload["filesize_approx"])
+    return results
 
 
 def search_youtube(query, limit=8, runner=None):
@@ -1631,39 +1973,91 @@ class CercaDownloadError(RuntimeError):
     instead of dumping a stack trace."""
 
 
-def download_archive_org(url, dest_path, progress_cb=None, opener=None, chunk_size=1024 * 256):
+_ARCHIVE_RETRY_BACKOFFS = (2, 5, 10)
+
+
+def _is_retryable_archive_error(exc):
+    """Return True when `exc` looks like a transient archive.org failure
+    (HTTP 5xx, transport reset, timeout) and False for hard failures
+    (404, 403) we should NOT retry on."""
+    code = getattr(exc, "code", None)
+    if code is not None:
+        try:
+            return 500 <= int(code) < 600
+        except (TypeError, ValueError):
+            return False
+    # urllib.error.URLError wraps OSError / socket errors — those are
+    # transport-level glitches we want to retry.
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    if isinstance(exc, (OSError, TimeoutError)):
+        return True
+    return False
+
+
+def download_archive_org(
+    url,
+    dest_path,
+    progress_cb=None,
+    opener=None,
+    chunk_size=1024 * 256,
+    sleep_fn=None,
+):
     """Stream a single archive.org file to disk. Calls `progress_cb(downloaded,
     total)` periodically when provided. Returns the destination path on
-    success, raises `CercaDownloadError` otherwise."""
+    success, raises `CercaDownloadError` otherwise.
+
+    Transient archive.org failures (HTTP 5xx / transport errors) are retried
+    up to `len(_ARCHIVE_RETRY_BACKOFFS) + 1` times with exponential backoff
+    (2s / 5s / 10s). Hard failures (404, 403) are surfaced immediately.
+    `sleep_fn` is injectable so tests can run the retry path without a real
+    sleep."""
     opener = opener or urllib.request.urlopen
+    sleep_fn = sleep_fn or time.sleep
     try:
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     except OSError as e:
         raise CercaDownloadError(f"cannot create dest dir: {e}") from e
-    try:
-        with opener(url, timeout=60) as resp:
-            total_raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
-            total = int(total_raw) if total_raw and str(total_raw).isdigit() else None
-            downloaded = 0
-            with open(dest_path, "wb") as out:
-                while True:
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_cb:
-                        try:
-                            progress_cb(downloaded, total)
-                        except Exception:
-                            pass
-    except Exception as e:
+
+    max_attempts = len(_ARCHIVE_RETRY_BACKOFFS) + 1
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
         try:
-            os.remove(dest_path)
-        except OSError:
-            pass
-        raise CercaDownloadError(f"archive.org download failed: {e}") from e
-    return dest_path
+            with opener(url, timeout=60) as resp:
+                total_raw = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+                total = int(total_raw) if total_raw and str(total_raw).isdigit() else None
+                downloaded = 0
+                with open(dest_path, "wb") as out:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb:
+                            try:
+                                progress_cb(downloaded, total)
+                            except Exception:
+                                pass
+            return dest_path
+        except Exception as e:
+            last_error = e
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
+            if attempt < max_attempts and _is_retryable_archive_error(e):
+                backoff = _ARCHIVE_RETRY_BACKOFFS[attempt - 1]
+                log.warning(
+                    f"  archive.org download failed (attempt {attempt}/{max_attempts}): "
+                    f"{e}; retrying in {backoff}s"
+                )
+                sleep_fn(backoff)
+                continue
+            raise CercaDownloadError(f"archive.org download failed: {e}") from e
+    # Defensive: loop should always return or raise above. If we fall through
+    # somehow, raise with the last captured error so the caller surfaces it.
+    raise CercaDownloadError(f"archive.org download failed: {last_error}")
 
 
 def download_youtube(video_id, dest_dir, min_resolution=None, progress_cb=None, runner=None):
@@ -4551,7 +4945,10 @@ def _cerca_film_hash(film_dict):
 
 def _parallel_search_sources(title, year):
     """Run archive.org + YouTube searches in parallel. Both calls degrade to
-    [] on error; never raises. Returns (archive_results, youtube_results)."""
+    [] on error; never raises. YouTube results have their real resolution
+    discovered via a follow-up `yt-dlp --skip-download --print` per top-N
+    candidate (the flat-playlist search does not return height). Returns
+    (archive_results, youtube_results)."""
     query = f"{title} {year}".strip() if year else title
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_archive = pool.submit(search_archive_org, title, year, CERCA_RESULT_LIMIT_PER_SOURCE)
@@ -4568,16 +4965,28 @@ def _parallel_search_sources(title, year):
                 archive_results = value or []
             else:
                 youtube_results = value or []
+    if youtube_results:
+        try:
+            youtube_results = _enrich_youtube_results(youtube_results)
+        except Exception as e:
+            log.debug(f"  /cerca youtube enrichment skipped: {e}")
     return archive_results, youtube_results
 
 
 def _annotate_youtube_quality(results):
-    """yt-dlp's flat-playlist mode doesn't expose resolution, so we cannot
-    pre-filter by min height. Mark each entry with `quality_hint` derived from
-    the title keywords — best-effort; the badge is decorative only."""
+    """Attach `quality_hint` to each YouTube result. When the enrichment step
+    has already discovered the true resolution (`resolution_label`), we use it
+    verbatim; otherwise we fall back to title-keyword guessing. The hint is
+    decorative and only feeds the picker label / confirmation card."""
     out = []
     for r in results:
-        title_lower = (r.get("title") or "").lower()
+        new = dict(r)
+        authoritative = new.get("resolution_label")
+        if authoritative:
+            new["quality_hint"] = authoritative
+            out.append(new)
+            continue
+        title_lower = (new.get("title") or "").lower()
         if any(tag in title_lower for tag in ("4k", "2160p")):
             hint = "2160p"
         elif "1080" in title_lower:
@@ -4588,25 +4997,28 @@ def _annotate_youtube_quality(results):
             hint = "480p"
         else:
             hint = "?"
-        new = dict(r)
         new["quality_hint"] = hint
         out.append(new)
     return out
 
 
 def _format_cerca_button(result):
-    """Compact, Telegram-safe inline-button label. Mirrors the user's UX brief:
-    `🎞 archive.org · 1080p · 1h35m · 1.2GB` and the YouTube counterpart."""
+    """Compact, Telegram-safe inline-button label. Includes the real
+    resolution when known (Bug 1), penalty badges (`rescored`, `fan edit`...)
+    when the title matches a `_CERCA_PENALTY_PATTERNS` rule (Bug 5+7), and a
+    `⚠️` prefix for sub-720p / unknown YouTube uploads (low-quality flag)."""
     duration = _format_duration(result.get("duration_sec"))
+    resolution = result.get("resolution_label") or result.get("quality_hint") or "?"
+    badges = _result_match_badges(result)
+    badge_text = (" " + " ".join(badges)) if badges else ""
     if result["source"] == "archive":
         size = _human_size(result.get("size")) if result.get("size") else "?"
         ident = result.get("identifier") or ""
-        label = f"🎞 archive · {duration} · {size} · {ident[:20]}"
+        label = f"🎞 archive · {resolution} · {duration} · {size} · {ident[:18]}{badge_text}"
     else:
-        hint = result.get("quality_hint") or "?"
-        title = (result.get("title") or "")[:30]
-        label = f"📺 YouTube · {hint} · {duration} · {title}"
-        if hint in ("480p", "?"):
+        title = (result.get("title") or "")[:28]
+        label = f"📺 YouTube · {resolution} · {duration} · {title}{badge_text}"
+        if resolution in ("480p", "360p", "?"):
             label = f"⚠️ {label}"
     return label[:80]
 
@@ -4634,6 +5046,16 @@ def do_cerca_search(query, progress_msg_id=None):
             tmdb_id = top.get("tmdb_id")
             canonical_title = top.get("title") or title
             canonical_year = top.get("year") or year
+
+    # Detail lookup (runtime + director) — best-effort, never blocks the
+    # search. Used by `score_result` for duration-coherence scoring and by
+    # `_render_cerca_confirm` to render `🎬 Regia: ...` on the card.
+    director = None
+    tmdb_runtime_min = None
+    if tmdb_id:
+        details = tmdb_get_movie_details(tmdb_id)
+        director = details.get("director")
+        tmdb_runtime_min = details.get("runtime_min")
 
     label = canonical_title + (f" ({canonical_year})" if canonical_year else "")
     if progress_msg_id:
@@ -4663,6 +5085,37 @@ def do_cerca_search(query, progress_msg_id=None):
     for r in youtube_results:
         combined.append(r)
 
+    # Score + filter + sort (Bugs 5 + 6). Anything below the exclusion
+    # threshold is dropped from the picker entirely (trailers, clips,
+    # behind-the-scenes...). The remaining list is sorted by score DESC so
+    # the cleanest, most-likely-the-actual-film entries appear on top.
+    scored = []
+    for r in combined:
+        s = score_result(r, tmdb_runtime_min=tmdb_runtime_min)
+        if s < _CERCA_EXCLUDE_SCORE_THRESHOLD:
+            log.info(
+                f"  /cerca: excluding low-score result "
+                f"(score={s}) {r.get('source')} {r.get('title') or r.get('identifier')}"
+            )
+            continue
+        rcopy = dict(r)
+        rcopy["score"] = s
+        scored.append(rcopy)
+    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
+    combined = scored
+
+    if not combined:
+        msg = (
+            f"❌ Tutti i risultati per <b>{html.escape(label)}</b> sembrano essere "
+            f"trailer, clip o materiale extra.\n"
+            f"Prova con un titolo diverso o aggiungi l'anno."
+        )
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
     film_hash = _cerca_film_hash({"tmdb_id": tmdb_id, "title": canonical_title, "year": canonical_year})
     requests_state = load_requests()
     pending = requests_state.setdefault("pending_cerca", {})
@@ -4670,7 +5123,10 @@ def do_cerca_search(query, progress_msg_id=None):
         "tmdb_id": tmdb_id,
         "title": canonical_title,
         "year": canonical_year,
+        "director": director,
+        "tmdb_runtime_min": tmdb_runtime_min,
         "results": combined,
+        "downloading_idx": None,
         "ts": datetime.now().isoformat(),
     }
     save_requests(requests_state)
@@ -4700,7 +5156,13 @@ def do_cerca_search(query, progress_msg_id=None):
 
 def _render_cerca_confirm(film_hash, result_idx, progress_msg_id=None):
     """Show the confirmation card for a single picked result before triggering
-    the actual download. Returns False if the session has expired."""
+    the actual download. Returns False if the session has expired.
+
+    The card shows TMDb-resolved director (when available), the real
+    resolution discovered during search enrichment, any `_CERCA_PENALTY_PATTERNS`
+    badges that fired on the result (so the user sees `⚠️ Versione rescore`
+    BEFORE confirming) and the human-readable archive.org metadata title
+    instead of the ugly identifier slug."""
     requests_state = load_requests()
     entry = requests_state.get("pending_cerca", {}).get(f"film:{film_hash}")
     if not entry:
@@ -4710,26 +5172,42 @@ def _render_cerca_confirm(film_hash, result_idx, progress_msg_id=None):
         return False
     r = results[result_idx]
     label = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
+    director = entry.get("director")
     duration = _format_duration(r.get("duration_sec"))
+    resolution = r.get("resolution_label") or r.get("quality_hint") or "?"
+    badges = _result_match_badges(r)
+    low_q = resolution in ("480p", "360p", "?")
+    warning_line = ""
+    if badges:
+        warning_line = "\n⚠️ <i>Possibilmente versione alternativa: " + ", ".join(badges) + "</i>"
+    elif low_q and r["source"] == "youtube":
+        warning_line = "\n⚠️ <i>Bassa qualità</i>"
+
     if r["source"] == "archive":
         size = _human_size(r.get("size")) if r.get("size") else "?"
-        source_line = f"🎞 archive.org · <code>{html.escape(r.get('identifier') or '')}</code>"
-        size_line = f"💾 {size} · {duration}"
-        details_line = f"📁 {html.escape(r.get('file_name') or '')}"
+        readable_title = (r.get("title") or "").strip() or (r.get("identifier") or "")
+        source_line = f"📺 archive.org · {resolution} · {size}"
+        details_line = (
+            f"📝 <i>{html.escape(readable_title[:120])}</i>\n"
+            f"📁 <code>{html.escape(r.get('identifier') or '')}</code>"
+        )
     else:
         uploader = r.get("uploader") or "?"
-        hint = r.get("quality_hint") or "?"
-        warning = " ⚠️ <i>bassa qualità</i>" if hint in ("480p", "?") else ""
-        source_line = f"📺 YouTube · <i>{html.escape(uploader)}</i>"
-        size_line = f"📐 {hint} · {duration}{warning}"
-        details_line = f"🔗 <code>{html.escape(r.get('url') or '')}</code>"
+        source_line = f"📺 YouTube · {resolution} · {duration}"
+        details_line = (
+            f"📝 <i>{html.escape((r.get('title') or '')[:120])}</i>\n"
+            f"👤 {html.escape(uploader)}"
+        )
 
+    director_line = f"\n🎬 Regia: {html.escape(director)}" if director else ""
     body = (
-        f"🎬 <b>{html.escape(label)}</b>\n"
+        f"⬇️ <b>Conferma download</b>\n\n"
+        f"🎬 <b>{html.escape(label)}</b>"
+        f"{director_line}\n"
         f"{source_line}\n"
-        f"{size_line}\n"
-        f"{details_line}\n\n"
-        f"<i>{html.escape(r.get('title') or '')[:200]}</i>"
+        f"⏱ {duration}\n"
+        f"{details_line}"
+        f"{warning_line}"
     )
     rows = [
         [{"text": "⬇️ Conferma download", "callback_data": f"cerca_grab:{film_hash}:{result_idx}"}],
@@ -4859,26 +5337,67 @@ def do_cerca_download(film_hash, result_idx, msg_id=None):
             )
     except CercaDownloadError as e:
         log.warning(f"  /cerca download failed for '{label}': {e}")
+        # Release the idempotency lock so the user can retry from the picker.
+        _release_cerca_downloading_idx(film_hash)
         if msg_id:
-            tg_edit_message(
-                msg_id,
-                f"❌ Download fallito per <b>{html.escape(label)}</b>:\n"
-                f"<code>{html.escape(str(e))}</code>"
-            )
+            _render_cerca_download_error(msg_id, film_hash, label, r.get("source"), str(e))
     except Exception as e:
         log.error(f"  /cerca unexpected error for '{label}': {e}", exc_info=True)
+        _release_cerca_downloading_idx(film_hash)
         if msg_id:
-            tg_edit_message(
-                msg_id,
-                f"❌ Errore inatteso durante <b>{html.escape(label)}</b>:\n"
-                f"<code>{html.escape(str(e))[:200]}</code>"
-            )
+            _render_cerca_download_error(msg_id, film_hash, label, r.get("source"), str(e))
     finally:
         try:
             import shutil as _shutil
             _shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             pass
+
+
+def _release_cerca_downloading_idx(film_hash):
+    """Reset the in-flight download marker on the pending cerca entry so a
+    subsequent `cerca_grab` callback is not blocked by the idempotency guard.
+    The pending entry itself stays in place so the user can hit
+    `↩️ Cambia fonte` and pick another result."""
+    rs = load_requests()
+    entry = rs.get("pending_cerca", {}).get(f"film:{film_hash}")
+    if entry:
+        entry["downloading_idx"] = None
+        save_requests(rs)
+
+
+def _render_cerca_download_error(msg_id, film_hash, label, source, raw_error):
+    """Friendly Telegram error card after a /cerca download has failed.
+    Replaces the cryptic `<code>archive.org download failed: HTTP Error
+    500</code>` with a guided message and a `↩️ Cambia fonte` button that
+    reopens the picker so the user can fall back to YouTube (or vice
+    versa)."""
+    if source == "archive":
+        body = (
+            f"❌ <b>Download fallito da archive.org</b>\n\n"
+            f"🎬 {html.escape(label)}\n\n"
+            f"Il file potrebbe essere temporaneamente non disponibile.\n"
+            f"Riprova fra qualche minuto o usa <b>↩️ Cambia fonte</b> "
+            f"per provare YouTube."
+        )
+    elif source == "youtube":
+        body = (
+            f"❌ <b>Download fallito da YouTube</b>\n\n"
+            f"🎬 {html.escape(label)}\n\n"
+            f"Il video potrebbe essere stato rimosso o avere restrizioni geografiche.\n"
+            f"Usa <b>↩️ Cambia fonte</b> per provare archive.org."
+        )
+    else:
+        body = (
+            f"❌ <b>Download fallito</b>\n\n"
+            f"🎬 {html.escape(label)}\n\n"
+            f"Dettagli: <code>{html.escape(str(raw_error))[:200]}</code>"
+        )
+    rows = [
+        [{"text": "↩️ Cambia fonte", "callback_data": f"cerca_back:{film_hash}"}],
+        [{"text": "❌ Annulla", "callback_data": f"cerca_cancel:{film_hash}"}],
+    ]
+    tg_edit_message(msg_id, body, reply_markup={"inline_keyboard": rows})
 
 
 def do_retranslate(query, state, progress_msg_id=None):
@@ -5641,6 +6160,36 @@ def process_callbacks(state, excludes):
                         if msg_id:
                             tg_edit_message(msg_id, "⚠️ Sessione scaduta. Rilancia <code>/cerca</code>.")
                         continue
+                    # Idempotency guard (Bug 2): a single download per pending
+                    # cerca session. If the user clicks "Conferma" twice while
+                    # the worker is still processing the first job, the second
+                    # click just answers the toast and exits — no duplicate
+                    # enqueue, no duplicate Telegram noise.
+                    current = entry.get("downloading_idx")
+                    if current is not None and current == result_idx:
+                        tg_answer_callback(cb_id, "⏳ Download già in corso")
+                        continue
+                    entry["downloading_idx"] = result_idx
+                    entry["last_grab_at"] = datetime.now().isoformat()
+                    save_requests(rs)
+
+                    # Instant feedback (Bug 3): edit the message BEFORE
+                    # enqueueing so the user sees confirmation even when the
+                    # worker is busy. The worker later overwrites this with
+                    # the progress bar.
+                    r = (entry.get("results") or [])[result_idx]
+                    label = entry["title"] + (
+                        f" ({entry['year']})" if entry.get("year") else ""
+                    )
+                    src_name = "archive.org" if r.get("source") == "archive" else "YouTube"
+                    resolution = r.get("resolution_label") or r.get("quality_hint") or "?"
+                    if msg_id:
+                        tg_edit_message(
+                            msg_id,
+                            f"⬇️ <b>Avvio download…</b>\n\n"
+                            f"🎬 {html.escape(label)}\n"
+                            f"📺 {src_name} · {resolution}"
+                        )
                     tg_answer_callback(cb_id, "⬇️ Avvio")
                     download_queue.put({
                         "type": "cerca_download",
