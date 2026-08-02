@@ -735,6 +735,23 @@ def detect_language_from_srt(srt_path, sample_size=2000):
 
 
 EN_SUB_SUFFIXES = [".en.srt", ".eng.srt", ".english.srt"]
+IT_SUB_SUFFIXES = [".it.srt", ".ita.srt", ".italian.srt", ".it.hi.srt",
+                   ".it.ass", ".ita.ass"]
+
+# Suffixes that /sincronizza and /cleanup operate on. Restricted to .srt because
+# ffsubsync cannot rewrite .ass, and covers both languages so English subs get
+# aligned to the audio just like Italian ones.
+SYNCABLE_SUB_SUFFIXES = [s for s in IT_SUB_SUFFIXES + EN_SUB_SUFFIXES
+                         if s.endswith(".srt")]
+
+
+def split_sub_suffix(filename):
+    """Return the subtitle suffix `filename` ends with, or None if it is not a
+    syncable subtitle. Longest match wins so `.it.hi.srt` is not read as `.srt`."""
+    for suffix in sorted(SYNCABLE_SUB_SUFFIXES, key=len, reverse=True):
+        if filename.endswith(suffix):
+            return suffix
+    return None
 
 
 def find_english_sub(video_path):
@@ -836,7 +853,7 @@ def get_series_folder(filepath):
 
 def has_italian_sub(video_path):
     base = os.path.splitext(video_path)[0]
-    for suffix in [".it.srt", ".ita.srt", ".italian.srt", ".it.hi.srt", ".it.ass", ".ita.ass"]:
+    for suffix in IT_SUB_SUFFIXES:
         if os.path.exists(base + suffix):
             return True
     return False
@@ -5639,7 +5656,8 @@ def _cmd_sincronizza(arg, state, excludes):
     if not arg:
         tg_send(
             "Usa: <code>/sincronizza nome serie o film</code>\n"
-            "Es: <code>/sincronizza Pluribus</code> oppure <code>/sincronizza all</code> per tutti."
+            "Es: <code>/sincronizza Pluribus</code> oppure <code>/sincronizza all</code> per tutti.\n"
+            "Allinea all'audio sia i sottotitoli ITA che quelli ENG."
         )
         return
     pos = queue_position()
@@ -5910,7 +5928,7 @@ COMMANDS = [
     # Sub management
     {"canonical": "/sincronizza", "aliases": ["/sync"], "handler": _cmd_sincronizza,
      "group": "Gestione sub", "args": "<nome|all>",
-     "desc": "Riallinea sub esistenti all'audio"},
+     "desc": "Riallinea sub ITA ed ENG esistenti all'audio"},
     {"canonical": "/traduci", "aliases": ["/translate", "/tr", "/t"], "handler": _cmd_traduci,
      "group": "Gestione sub", "args": "<nome>",
      "desc": "Traduce .en.srt → .it.srt (DeepL + Claude polish)"},
@@ -6789,7 +6807,8 @@ def do_sync(query, state, progress_msg_id=None):
             continue
         for root, dirs, files in os.walk(media_path):
             for f in files:
-                if not f.endswith(".it.srt"):
+                suffix = split_sub_suffix(f)
+                if not suffix:
                     continue
                 srt_path = os.path.join(root, f)
                 folder = get_series_folder(srt_path)
@@ -6797,7 +6816,7 @@ def do_sync(query, state, progress_msg_id=None):
                 if not is_all and query_lower not in folder.lower() and query_lower not in f.lower():
                     continue
 
-                video_base = srt_path.rsplit(".it.srt", 1)[0]
+                video_base = srt_path[:-len(suffix)]
                 for ext in VIDEO_EXTENSIONS:
                     candidate = video_base + ext
                     if os.path.exists(candidate):
@@ -6805,7 +6824,7 @@ def do_sync(query, state, progress_msg_id=None):
                         break
 
     if not pairs:
-        msg = f"❌ Nessun sub ITA trovato per '<b>{query}</b>'"
+        msg = f"❌ Nessun sub ITA o ENG trovato per '<b>{query}</b>'"
         if progress_msg_id:
             tg_edit_message(progress_msg_id, msg)
         else:
@@ -6851,7 +6870,7 @@ def do_sync(query, state, progress_msg_id=None):
 
 
 def do_cleanup(state, progress_msg_id=None):
-    """Scan all .it.srt files, remove placeholders and re-queue the matching videos."""
+    """Scan every ITA/ENG subtitle, remove placeholders and re-queue the matching videos."""
     removed = 0
     requeued = 0
     for media_path in [FILMS_PATH, SERIES_PATH]:
@@ -6859,7 +6878,8 @@ def do_cleanup(state, progress_msg_id=None):
             continue
         for root, dirs, files in os.walk(media_path):
             for f in files:
-                if f.endswith(".it.srt"):
+                suffix = split_sub_suffix(f)
+                if suffix:
                     srt_path = os.path.join(root, f)
                     try:
                         with open(srt_path, "rb") as fh:
@@ -6868,7 +6888,7 @@ def do_cleanup(state, progress_msg_id=None):
                             os.remove(srt_path)
                             removed += 1
                             log.info(f"  🗑 Placeholder rimosso: {f}")
-                            video_base = srt_path.rsplit(".it.srt", 1)[0]
+                            video_base = srt_path[:-len(suffix)]
                             for ext in VIDEO_EXTENSIONS:
                                 video_candidate = video_base + ext
                                 if os.path.exists(video_candidate):

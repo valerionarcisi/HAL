@@ -4666,5 +4666,84 @@ class TestArchiveYearMismatchWarn(unittest.TestCase):
             sub_fetcher.log.removeHandler(handler)
 
 
+class TestSyncableSubSuffixes(unittest.TestCase):
+    """split_sub_suffix drives which files /sincronizza and /cleanup touch."""
+
+    def test_recognises_italian_and_english_srt(self):
+        for name, expected in [
+            ("Film (2001).it.srt", ".it.srt"),
+            ("Film (2001).ita.srt", ".ita.srt"),
+            ("Film (2001).italian.srt", ".italian.srt"),
+            ("Film (2001).en.srt", ".en.srt"),
+            ("Film (2001).eng.srt", ".eng.srt"),
+            ("Film (2001).english.srt", ".english.srt"),
+        ]:
+            self.assertEqual(sub_fetcher.split_sub_suffix(name), expected, name)
+
+    def test_longest_suffix_wins(self):
+        # .it.hi.srt must not be truncated to .srt, or the video base would keep ".it.hi"
+        self.assertEqual(sub_fetcher.split_sub_suffix("Film.it.hi.srt"), ".it.hi.srt")
+
+    def test_ignores_non_subtitles_and_ass(self):
+        # .ass is excluded: ffsubsync cannot rewrite it
+        for name in ["Film (2001).mkv", "Film (2001).it.ass", "Film (2001).nfo", "notes.txt"]:
+            self.assertIsNone(sub_fetcher.split_sub_suffix(name), name)
+
+    def test_suffix_list_covers_both_languages(self):
+        self.assertIn(".it.srt", sub_fetcher.SYNCABLE_SUB_SUFFIXES)
+        self.assertIn(".en.srt", sub_fetcher.SYNCABLE_SUB_SUFFIXES)
+        self.assertNotIn(".it.ass", sub_fetcher.SYNCABLE_SUB_SUFFIXES)
+
+    def test_has_italian_sub_still_ignores_english(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            video = os.path.join(tmpdir, "Film (2001).mkv")
+            open(video, "w").close()
+            open(os.path.join(tmpdir, "Film (2001).en.srt"), "w").close()
+            self.assertFalse(sub_fetcher.has_italian_sub(video))
+            open(os.path.join(tmpdir, "Film (2001).it.srt"), "w").close()
+            self.assertTrue(sub_fetcher.has_italian_sub(video))
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+class TestDoSyncCoversEnglish(unittest.TestCase):
+    """/sincronizza must align English subs to the audio, not just Italian ones."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.films = os.path.join(self.tmpdir, "films")
+        os.makedirs(os.path.join(self.films, "Film (2001)"))
+        base = os.path.join(self.films, "Film (2001)", "Film (2001)")
+        for suffix in [".mkv", ".it.srt", ".en.srt"]:
+            open(base + suffix, "w").close()
+
+        self._orig = (sub_fetcher.FILMS_PATH, sub_fetcher.SERIES_PATH,
+                      sub_fetcher.sync_subtitle, sub_fetcher.tg_send,
+                      sub_fetcher.tg_edit_message)
+        self.synced = []
+        sub_fetcher.FILMS_PATH = self.films
+        sub_fetcher.SERIES_PATH = os.path.join(self.tmpdir, "missing")
+        sub_fetcher.sync_subtitle = lambda v, s, min_score=0: (self.synced.append(s), {"ok": True})[1]
+        sub_fetcher.tg_send = lambda *a, **k: None
+        sub_fetcher.tg_edit_message = lambda *a, **k: None
+
+    def tearDown(self):
+        (sub_fetcher.FILMS_PATH, sub_fetcher.SERIES_PATH, sub_fetcher.sync_subtitle,
+         sub_fetcher.tg_send, sub_fetcher.tg_edit_message) = self._orig
+        shutil.rmtree(self.tmpdir)
+
+    def test_syncs_both_languages(self):
+        sub_fetcher.do_sync("all", {})
+        synced = sorted(os.path.basename(p) for p in self.synced)
+        self.assertEqual(synced, ["Film (2001).en.srt", "Film (2001).it.srt"])
+
+    def test_video_is_resolved_for_english_sub(self):
+        # If the suffix were stripped wrongly the .en.srt would match no video
+        # and be dropped silently instead of being synced.
+        sub_fetcher.do_sync("all", {})
+        self.assertEqual(len(self.synced), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
