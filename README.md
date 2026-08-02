@@ -108,6 +108,7 @@ The canonical command names are in Italian (the bot speaks Italian), and each on
 | Command | Aliases | Description |
 |---|---|---|
 | `/sincronizza <name\|all>` | `/sync` | Sync existing subs to video audio |
+| `/subeng <name>` | `/eng`, `/en` | Search and download the correct English sub (Subdl → OpenSubtitles), synced to the audio. Unlike `/sub` it runs even when the video already has an `.it.srt`, so it fixes a wrong or missing `.en.srt` without touching the Italian one. Videos that already have an English sub trigger a `[🔄 Sostituisci] / [⏭️ Salta esistenti]` prompt; a failed search restores the previous file. |
 | `/traduci <name>` | `/translate`, `/tr`, `/t` | Sync `.en.srt` and translate EN→IT (DeepL + Claude polish) |
 | `/ritraduci <name>` | `/retranslate`, `/rt` | Delete `.it.srt` and retranslate from the existing `.en.srt` (no re-download) |
 | `/cancella <name>` | `/delete`, `/del` | Delete all subs and re-queue for a fresh search |

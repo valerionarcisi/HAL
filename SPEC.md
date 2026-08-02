@@ -208,6 +208,7 @@ Type any text in Telegram to search. Handles dots/underscores in filenames (e.g.
 | `/reset` | Clear state cache |
 | `/help` | Help |
 | `/sync [name]` | Sync all/matching .it.srt to video audio |
+| `/subeng <name>` | Dedicated English-sub search for videos matching `<name>` — see "English sub search (`/subeng`)" below |
 | `/translate <name>` | For videos matching `<name>` with an English sub (`.en.srt`, `.eng.srt`, `.english.srt`) but no `.it.srt`, sync each EN sub to audio and then ask the user to confirm the EN→IT translation (Claude). Reuses the batch translate flow. |
 | `/delete <name>` | List all subtitle files (`.it.srt`, `.ita.srt`, `.en.srt`, `.eng.srt`, `.english.srt`, `.italian.srt`, `.it.hi.srt`) for videos matching `<name>` and offer a confirmation. On confirm: deletes the files, removes the videos from `state["downloaded"]` and `state["asked"]`, and re-queues each video for a fresh download. |
 | `/sub <name>` | Manual library search by title (was `/cerca` pre-multi-source) |
@@ -215,6 +216,17 @@ Type any text in Telegram to search. Handles dots/underscores in filenames (e.g.
 | `/scarica <name [year]> [--lang CODE]` | Request a new film via Radarr with optional language filter (see "Language-targeted download" below) |
 | `/ita <name [year]>` | Shortcut for `/scarica ... --lang ITA` |
 | `<text>` | Search for videos matching text |
+
+### English sub search (`/subeng`)
+
+`/subeng <name>` (aliases `/eng`, `/en`) is the English-side counterpart of the automatic ITA cascade. Everywhere else the `.en.srt` is a by-product of `do_download()`, which cannot be reached once a video already has a subtitle: STEP 0 returns early on an existing sub, and `search_and_offer` filters out anything with an `.it.srt`. `/subeng` closes that gap.
+
+- **Scope** — operates on every video matched by `find_videos_by_name(query)`, **regardless of whether an `.it.srt` exists**. The Italian sub is never read, written or deleted.
+- **Provider cascade** — reuses `_try_save_eng()` unchanged: Subdl EN → OpenSubtitles EN → `validate_sync()`. The score gate is not bypassed; a candidate below `SYNC_MIN_SCORE` is discarded like anywhere else.
+- **Existing-sub prompt** — if any match already has an English sub (`.en.srt`, `.eng.srt`, `.english.srt`), nothing is downloaded until the user answers an inline prompt: `[🔄 Sostituisci (n)]` re-searches every match, `[⏭️ Salta esistenti (n)]` processes only the ones without an English sub. The pending set is stored in `batches.json` under `{"type": "subeng", "query", "paths", "missing"}` and the choice comes back as the `subeng_replace` / `subeng_skip` callbacks, which re-queue the job with an explicit `paths` list.
+- **Non-destructive replace** (`replace_english_sub`) — `validate_sync` writes its candidate directly to the destination and deletes it when the score is too low, so replacing in place would destroy a sub the user already had whenever the new one turns out to be bad. The previous file is therefore copied to a temp file first and restored if the search errors, finds nothing, or fails the sync gate. On success a differently-named predecessor (`.eng.srt` / `.english.srt`) is removed so the media server is not left with two English tracks.
+- **Queue** — job type `subeng`, carrying `query` plus an optional `paths` list; shown in `/coda` as `🇬🇧 sub ENG <query>`. No `state.json` mutation: English subs are not tracked in `state["downloaded"]`, so the job needs no state handoff between threads.
+- **Cost** — free. Only provider search and `ffsubsync` run; no translation is triggered, so no cost gate applies.
 
 ### Multi-source download (`/cerca`)
 

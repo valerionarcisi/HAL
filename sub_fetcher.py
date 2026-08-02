@@ -4345,6 +4345,61 @@ def _try_save_eng(subdl, client, os_logged_in, video_path, en_srt_path, trace):
     return True
 
 
+def replace_english_sub(subdl, client, os_logged_in, video_path, trace=None):
+    """Search a fresh English sub for `video_path` and install it as `.en.srt`.
+
+    Safe to run on a video that already has an English sub, which `_try_save_eng`
+    alone is not: `validate_sync` writes the candidate straight to the
+    destination and deletes it when the score is too low, so a miss would
+    otherwise wipe a sub the user already had. The previous file is kept aside
+    and restored on any failure.
+
+    Returns True when a new synced sub was installed.
+    """
+    import shutil
+
+    en_srt_path = os.path.splitext(video_path)[0] + ".en.srt"
+    old_path = find_english_sub(video_path)
+
+    backup = None
+    if old_path:
+        try:
+            fd, backup = tempfile.mkstemp(prefix="subeng_", suffix=".srt")
+            os.close(fd)
+            shutil.copy2(old_path, backup)
+        except Exception as e:
+            log.warning(f"  Could not back up {os.path.basename(old_path)}: {e}")
+            backup = None
+
+    try:
+        saved = _try_save_eng(subdl, client, os_logged_in, video_path, en_srt_path, trace)
+    except Exception as e:
+        log.error(f"  ENG search error for {os.path.basename(video_path)}: {e}")
+        saved = False
+
+    try:
+        if saved:
+            # A stale `.eng.srt` / `.english.srt` alongside the new `.en.srt`
+            # would leave the media server with two English tracks.
+            if old_path and old_path != en_srt_path:
+                try:
+                    os.remove(old_path)
+                except OSError as e:
+                    log.warning(f"  Could not remove superseded {os.path.basename(old_path)}: {e}")
+            return True
+
+        if backup and not os.path.exists(old_path):
+            shutil.copy2(backup, old_path)
+            log.info(f"  Restored previous ENG sub: {os.path.basename(old_path)}")
+        return False
+    finally:
+        if backup:
+            try:
+                os.remove(backup)
+            except OSError:
+                pass
+
+
 # =============================================================================
 # TELEGRAM INTERACTION
 # =============================================================================
@@ -5711,6 +5766,26 @@ def _cmd_ritraduci(arg, state, excludes):
     download_queue.put({"type": "retranslate", "query": arg, "msg_id": msg_id})
 
 
+def _cmd_subeng(arg, state, excludes):
+    """Dedicated English-subtitle search. Unlike /sub it does not care whether
+    the video already has an Italian sub — the target is the .en.srt itself."""
+    if not arg:
+        tg_send(
+            "Usa: <code>/subeng nome film o serie</code>\n"
+            "Es: <code>/subeng Pluribus</code>\n"
+            "Cerca e scarica il sottotitolo inglese corretto (Subdl → OpenSubtitles), "
+            "già sincronizzato sull'audio. Funziona anche se il video ha già il sub ITA."
+        )
+        return
+    pos = queue_position()
+    result = tg_send(
+        f"🇬🇧 Cerco sub ENG per <b>{html.escape(arg)}</b>..."
+        + (f"\n⏳ Posizione {pos + 1}" if pos > 0 else "")
+    )
+    msg_id = result["result"]["message_id"] if result and result.get("ok") else None
+    download_queue.put({"type": "subeng", "query": arg, "msg_id": msg_id})
+
+
 def _cmd_pulisci(arg, state, excludes):
     pos = queue_position()
     result = tg_send(
@@ -5841,6 +5916,8 @@ def _cmd_coda(arg, state, excludes):
             desc = f"🔁 ritraduzione <i>{html.escape(str(job.get('query', '?')))}</i>"
         elif jt == "sync":
             desc = f"🔄 sync <i>{html.escape(str(job.get('query', '?')))}</i>"
+        elif jt == "subeng":
+            desc = f"🇬🇧 sub ENG <i>{html.escape(str(job.get('query', '?')))}</i>"
         elif jt == "cleanup":
             desc = f"🧹 cleanup placeholder"
         else:
@@ -5929,6 +6006,9 @@ COMMANDS = [
     {"canonical": "/sincronizza", "aliases": ["/sync"], "handler": _cmd_sincronizza,
      "group": "Gestione sub", "args": "<nome|all>",
      "desc": "Riallinea sub ITA ed ENG esistenti all'audio"},
+    {"canonical": "/subeng", "aliases": ["/eng", "/en"], "handler": _cmd_subeng,
+     "group": "Gestione sub", "args": "<nome>",
+     "desc": "Cerca e scarica il sub ENG corretto, sincronizzato (anche se il sub ITA c'è già)"},
     {"canonical": "/traduci", "aliases": ["/translate", "/tr", "/t"], "handler": _cmd_traduci,
      "group": "Gestione sub", "args": "<nome>",
      "desc": "Traduce .en.srt → .it.srt (DeepL + Claude polish)"},
@@ -6472,6 +6552,40 @@ def process_callbacks(state, excludes):
 
                 batches.pop(path_hash, None)
                 save_batches(batches)
+                continue
+
+            if action in ("subeng_replace", "subeng_skip"):
+                batches = load_batches()
+                batch = batches.get(path_hash)
+                if not batch:
+                    tg_answer_callback(cb_id, "⚠️ Batch non trovato")
+                    continue
+
+                targets = (batch.get("paths", []) if action == "subeng_replace"
+                           else batch.get("missing", []))
+                query = batch.get("query", "")
+                batches.pop(path_hash, None)
+                save_batches(batches)
+
+                if not targets:
+                    tg_answer_callback(cb_id, "⏭ Niente da fare")
+                    if msg_id:
+                        tg_edit_message(msg_id,
+                            f"⏭ Nessun video da processare per <b>{html.escape(query)}</b>.\n"
+                            f"Tutti hanno già un sub ENG.")
+                    continue
+
+                pos = queue_position()
+                verb = "Sostituisco" if action == "subeng_replace" else "Cerco"
+                tg_answer_callback(cb_id, f"🇬🇧 In coda{f' (pos. {pos+1})' if pos > 0 else ''}...")
+                if msg_id:
+                    tg_edit_message(msg_id,
+                        f"🇬🇧 <b>{verb} i sub ENG...</b>\n\n"
+                        f"[░░░░░░░░░░] 0%\n"
+                        f"📊 0/{len(targets)}"
+                        + (f"\n⏳ In coda (posizione {pos+1})" if pos > 0 else ""))
+                download_queue.put({"type": "subeng", "query": query,
+                                    "paths": targets, "msg_id": msg_id})
                 continue
 
             if action in ("batch_yes", "batch_no", "grp_exclude", "batch_translate", "batch_keep_en"):
@@ -7076,6 +7190,124 @@ def do_translate_prep(query, state, progress_msg_id=None):
         tg_send(summary, reply_markup=keyboard)
 
 
+def do_download_english(query, state, progress_msg_id=None, paths=None):
+    """Search and install the English subtitle for every video matching `query`.
+
+    Deliberately ignores whether a video already has an Italian sub: the target
+    here is the `.en.srt` itself, so a video with a good `.it.srt` but a wrong
+    or missing English sub is still processed.
+
+    When some matches already have an English sub, the user is asked whether to
+    replace them before anything is downloaded. `paths` carries the answer back
+    from that prompt and bypasses the question.
+    """
+    if paths is None:
+        matches = find_videos_by_name(query)
+        if not matches:
+            _notify(progress_msg_id, f"❌ Nessun video trovato per '<b>{html.escape(query)}</b>'")
+            return
+
+        missing = [p for p in matches if not find_english_sub(p)]
+        existing = [p for p in matches if find_english_sub(p)]
+        if existing:
+            _offer_english_replace(query, matches, missing, existing, progress_msg_id)
+            return
+        targets = matches
+    else:
+        targets = paths
+
+    if not targets:
+        _notify(progress_msg_id, f"✅ Nessun video da processare per '<b>{html.escape(query)}</b>'")
+        return
+
+    subdl = SubdlClient()
+    client = OSClient()
+    os_logged_in = client.login()
+
+    total = len(targets)
+    saved = 0
+    failed = 0
+    saved_names = []
+    failed_names = []
+    trace = []
+
+    try:
+        for i, video_path in enumerate(targets):
+            if progress_msg_id and (i % 3 == 0 or i == total - 1):
+                tg_edit_message(
+                    progress_msg_id,
+                    f"🇬🇧 <b>Cerco sub ENG...</b>\n\n"
+                    f"{_progress_bar(i, total)}\n"
+                    f"📊 {i}/{total} — ✅ {saved} | ❌ {failed}\n\n"
+                    f"<i>{html.escape(friendly_name(video_path))}</i>",
+                )
+            if replace_english_sub(subdl, client, os_logged_in, video_path, trace):
+                saved += 1
+                saved_names.append(friendly_name(video_path))
+            else:
+                failed += 1
+                failed_names.append(friendly_name(video_path))
+            time.sleep(1)
+    finally:
+        if os_logged_in:
+            if client.downloads_remaining is not None:
+                trace.append({"_quota": client.downloads_remaining})
+            client.logout()
+
+    summary = f"🇬🇧 <b>Sub ENG — {html.escape(query)}</b>\n\n"
+    summary += f"✅ Scaricati: {saved}/{total}\n"
+    summary += f"❌ Non trovati: {failed}/{total}"
+    if saved_names and len(saved_names) <= 15:
+        summary += "\n\n<b>Scaricati:</b>\n" + "\n".join(
+            f"  ✅ {html.escape(n)}" for n in saved_names)
+    if failed_names and len(failed_names) <= 10:
+        summary += "\n\n<b>Non trovati:</b>\n" + "\n".join(
+            f"  ❌ {html.escape(n)}" for n in failed_names)
+        summary += "\n<i>I sub precedenti, se c'erano, sono stati mantenuti.</i>"
+    trace_text = format_search_trace(trace)
+    if failed and trace_text:
+        summary += f"\n\n<b>Tentativi:</b>\n{trace_text}"
+
+    _notify(progress_msg_id, summary)
+
+
+def _notify(msg_id, text, reply_markup=None):
+    """Edit the in-place progress message when there is one, else send a new one."""
+    if msg_id:
+        tg_edit_message(msg_id, text, reply_markup=reply_markup)
+    else:
+        tg_send(text, reply_markup=reply_markup)
+
+
+def _offer_english_replace(query, matches, missing, existing, progress_msg_id=None):
+    """Ask whether videos that already have an English sub should be re-searched."""
+    subeng_hash = str(abs(hash(tuple(matches))))[:8]
+    batches = load_batches()
+    batches[subeng_hash] = {"type": "subeng", "query": query,
+                            "paths": matches, "missing": missing}
+    save_batches(batches)
+
+    preview = "\n".join(f"  • {html.escape(friendly_name(p))}" for p in existing[:10])
+    if len(existing) > 10:
+        preview += f"\n  <i>… e altri {len(existing) - 10}</i>"
+
+    text = (
+        f"🇬🇧 <b>Sub ENG — {html.escape(query)}</b>\n\n"
+        f"📂 Video trovati: {len(matches)}\n"
+        f"📄 Hanno già un sub ENG: {len(existing)}\n"
+        f"🆕 Senza sub ENG: {len(missing)}\n\n"
+        f"<b>Già con sub ENG:</b>\n{preview}\n\n"
+        f"Cosa faccio con quelli che ce l'hanno già?"
+    )
+    keyboard = {"inline_keyboard": [[
+        {"text": f"🔄 Sostituisci ({len(matches)})",
+         "callback_data": f"subeng_replace:{subeng_hash}"},
+        {"text": f"⏭️ Salta esistenti ({len(missing)})",
+         "callback_data": f"subeng_skip:{subeng_hash}"},
+    ]]}
+    _notify(progress_msg_id, text, reply_markup=keyboard)
+
+
 def _estimate_batch_translation_cost(paths):
     """Estimate total translation cost for a list of video paths with English sub files.
     Accepts .en.srt, .eng.srt, .english.srt."""
@@ -7196,6 +7428,12 @@ def _queue_worker(state_ref):
                 msg_id = job.get("msg_id")
                 log.info(f"  Queue: sync '{query}'")
                 do_sync(query, state, progress_msg_id=msg_id)
+            elif job_type == "subeng":
+                query = job["query"]
+                msg_id = job.get("msg_id")
+                paths = job.get("paths")
+                log.info(f"  Queue: subeng '{query}' explicit_paths={len(paths) if paths is not None else 'no'}")
+                do_download_english(query, state, progress_msg_id=msg_id, paths=paths)
             elif job_type == "translate_prep":
                 query = job["query"]
                 msg_id = job.get("msg_id")

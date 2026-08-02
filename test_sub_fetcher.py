@@ -4745,5 +4745,291 @@ class TestDoSyncCoversEnglish(unittest.TestCase):
         self.assertEqual(len(self.synced), 2)
 
 
+class TestSubengCommandRegistry(unittest.TestCase):
+    """/subeng must be reachable via its canonical form and both aliases."""
+
+    def test_canonical_resolves(self):
+        spec = sub_fetcher._find_command("/subeng")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec["canonical"], "/subeng")
+
+    def test_aliases_resolve_to_same_spec(self):
+        for alias in ["/eng", "/en"]:
+            spec = sub_fetcher._find_command(alias)
+            self.assertIsNotNone(spec, alias)
+            self.assertEqual(spec["canonical"], "/subeng", alias)
+
+    def test_alias_does_not_shadow_ita(self):
+        # /ita is the Radarr shortcut; /eng must NOT be wired to it by accident.
+        self.assertEqual(sub_fetcher._find_command("/ita")["canonical"], "/ita")
+        self.assertNotEqual(sub_fetcher._find_command("/eng")["canonical"], "/ita")
+
+    def test_typo_gets_did_you_mean(self):
+        self.assertEqual(sub_fetcher._suggest_command("/subengg"), "/subeng")
+
+    def test_appears_in_help_registry(self):
+        canon = [c["canonical"] for c in sub_fetcher.COMMANDS]
+        self.assertIn("/subeng", canon)
+        spec = sub_fetcher._find_command("/subeng")
+        self.assertEqual(spec["group"], "Gestione sub")
+        self.assertTrue(spec["desc"])
+
+    def test_handler_is_wired(self):
+        self.assertIs(sub_fetcher._find_command("/subeng")["handler"],
+                      sub_fetcher._cmd_subeng)
+
+
+class TestSubengCommandDispatch(unittest.TestCase):
+    """The handler must enqueue a `subeng` job, and refuse an empty query."""
+
+    def _run(self, arg):
+        from unittest.mock import patch
+        captured = []
+        with patch.object(sub_fetcher.download_queue, "put", side_effect=captured.append), \
+                patch.object(sub_fetcher, "tg_send",
+                             return_value={"ok": True, "result": {"message_id": 7}}), \
+                patch.object(sub_fetcher, "queue_position", return_value=0):
+            sub_fetcher._cmd_subeng(arg, state={}, excludes=[])
+        return captured
+
+    def test_enqueues_subeng_job(self):
+        captured = self._run("Pluribus")
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["type"], "subeng")
+        self.assertEqual(captured[0]["query"], "Pluribus")
+        self.assertEqual(captured[0]["msg_id"], 7)
+
+    def test_empty_arg_shows_usage_and_enqueues_nothing(self):
+        self.assertEqual(self._run(""), [])
+
+    def test_queue_description_covers_subeng(self):
+        from unittest.mock import patch
+        sent = []
+        job = {"type": "subeng", "query": "Pluribus"}
+        with patch.object(sub_fetcher.download_queue, "queue", [job], create=True), \
+                patch.object(sub_fetcher, "tg_send", side_effect=lambda t, **k: sent.append(t)):
+            sub_fetcher._cmd_coda("", state={}, excludes=[])
+        self.assertTrue(sent)
+        # Must not fall through to the raw job-type branch.
+        self.assertNotIn("1. subeng", sent[0])
+        self.assertIn("Pluribus", sent[0])
+
+
+class _SubengFixture(unittest.TestCase):
+    """Shared media-tree + patched-provider scaffolding for the ENG search."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.films = os.path.join(self.tmpdir, "films")
+        self.moviedir = os.path.join(self.films, "Film (2001)")
+        os.makedirs(self.moviedir)
+        self.video = os.path.join(self.moviedir, "Film (2001).mkv")
+        open(self.video, "w").close()
+
+        self._orig = {k: getattr(sub_fetcher, k) for k in
+                      ["FILMS_PATH", "SERIES_PATH", "SubdlClient", "OSClient",
+                       "_try_save_eng", "tg_send", "tg_edit_message", "BATCHES_FILE"]}
+        sub_fetcher.FILMS_PATH = self.films
+        sub_fetcher.SERIES_PATH = os.path.join(self.tmpdir, "missing")
+        sub_fetcher.BATCHES_FILE = os.path.join(self.tmpdir, "batches.json")
+        sub_fetcher.SubdlClient = lambda *a, **k: object()
+        sub_fetcher.OSClient = lambda *a, **k: _FakeOSClient()
+        self.sent = []
+        self.edited = []
+        sub_fetcher.tg_send = lambda t, **k: (self.sent.append((t, k)),
+                                              {"ok": True, "result": {"message_id": 1}})[1]
+        sub_fetcher.tg_edit_message = lambda mid, t, **k: self.edited.append((mid, t, k))
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(sub_fetcher, k, v)
+        shutil.rmtree(self.tmpdir)
+
+    def base(self, suffix):
+        return os.path.join(self.moviedir, "Film (2001)" + suffix)
+
+    def write(self, suffix, text):
+        with open(self.base(suffix), "w") as f:
+            f.write(text)
+
+
+class _FakeOSClient:
+    downloads_remaining = None
+
+    def login(self):
+        return False
+
+    def logout(self):
+        pass
+
+
+class TestReplaceEnglishSub(_SubengFixture):
+    """replace_english_sub must never leave the user worse off than before."""
+
+    def test_saves_when_no_existing_sub(self):
+        def fake_save(subdl, client, logged_in, video, dest, trace):
+            with open(dest, "w") as f:
+                f.write("new")
+            return True
+        sub_fetcher._try_save_eng = fake_save
+
+        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        self.assertTrue(ok)
+        with open(self.base(".en.srt")) as f:
+            self.assertEqual(f.read(), "new")
+
+    def test_failed_search_restores_previous_sub(self):
+        self.write(".en.srt", "old-but-mine")
+
+        # Mirrors validate_sync: writes the candidate, then deletes it on a low score.
+        def fake_save(subdl, client, logged_in, video, dest, trace):
+            with open(dest, "w") as f:
+                f.write("candidate")
+            os.remove(dest)
+            return False
+        sub_fetcher._try_save_eng = fake_save
+
+        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        self.assertFalse(ok)
+        self.assertTrue(os.path.exists(self.base(".en.srt")))
+        with open(self.base(".en.srt")) as f:
+            self.assertEqual(f.read(), "old-but-mine")
+
+    def test_exception_restores_previous_sub(self):
+        self.write(".en.srt", "old-but-mine")
+
+        def boom(*a, **k):
+            raise RuntimeError("provider down")
+        sub_fetcher._try_save_eng = boom
+
+        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        self.assertFalse(ok)
+        with open(self.base(".en.srt")) as f:
+            self.assertEqual(f.read(), "old-but-mine")
+
+    def test_successful_replace_drops_differently_named_old_sub(self):
+        # A stale .eng.srt would sit next to the new .en.srt and confuse Emby.
+        self.write(".eng.srt", "old")
+
+        def fake_save(subdl, client, logged_in, video, dest, trace):
+            with open(dest, "w") as f:
+                f.write("new")
+            return True
+        sub_fetcher._try_save_eng = fake_save
+
+        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        self.assertTrue(ok)
+        self.assertFalse(os.path.exists(self.base(".eng.srt")))
+        with open(self.base(".en.srt")) as f:
+            self.assertEqual(f.read(), "new")
+
+    def test_failed_search_restores_differently_named_old_sub(self):
+        self.write(".english.srt", "old")
+        sub_fetcher._try_save_eng = lambda *a, **k: False
+
+        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        self.assertFalse(ok)
+        with open(self.base(".english.srt")) as f:
+            self.assertEqual(f.read(), "old")
+
+    def test_leaves_italian_sub_untouched(self):
+        self.write(".it.srt", "italiano")
+        sub_fetcher._try_save_eng = lambda *a, **k: False
+
+        sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        with open(self.base(".it.srt")) as f:
+            self.assertEqual(f.read(), "italiano")
+
+
+class TestDoDownloadEnglish(_SubengFixture):
+    """do_download_english drives the /subeng flow."""
+
+    def test_no_match_reports_and_searches_nothing(self):
+        called = []
+        sub_fetcher._try_save_eng = lambda *a, **k: called.append(1)
+        sub_fetcher.do_download_english("Inesistente", {})
+        self.assertEqual(called, [])
+        self.assertTrue(any("Inesistente" in t for t, _ in self.sent))
+
+    def test_searches_even_when_italian_sub_exists(self):
+        # This is the whole point of the command: /sub would skip this video.
+        self.write(".it.srt", "italiano")
+        searched = []
+
+        def fake_save(subdl, client, logged_in, video, dest, trace):
+            searched.append(video)
+            with open(dest, "w") as f:
+                f.write("new")
+            return True
+        sub_fetcher._try_save_eng = fake_save
+
+        sub_fetcher.do_download_english("Film", {})
+        self.assertEqual(searched, [self.video])
+
+    def test_existing_sub_asks_before_replacing(self):
+        self.write(".en.srt", "old")
+        called = []
+        sub_fetcher._try_save_eng = lambda *a, **k: called.append(1)
+
+        sub_fetcher.do_download_english("Film", {})
+
+        # Nothing searched yet — the user has to press a button first.
+        self.assertEqual(called, [])
+        keyboards = [k.get("reply_markup") for _, k in self.sent if k.get("reply_markup")]
+        self.assertEqual(len(keyboards), 1)
+        buttons = [b for row in keyboards[0]["inline_keyboard"] for b in row]
+        actions = sorted(b["callback_data"].split(":")[0] for b in buttons)
+        self.assertEqual(actions, ["subeng_replace", "subeng_skip"])
+
+    def test_confirmation_batch_is_persisted_with_both_path_sets(self):
+        self.write(".en.srt", "old")
+        other = os.path.join(self.moviedir, "Film (2001) part2.mkv")
+        open(other, "w").close()
+        sub_fetcher._try_save_eng = lambda *a, **k: False
+
+        sub_fetcher.do_download_english("Film", {})
+
+        batches = sub_fetcher.load_batches()
+        entry = [b for b in batches.values() if b.get("type") == "subeng"]
+        self.assertEqual(len(entry), 1)
+        self.assertEqual(sorted(entry[0]["paths"]), sorted([self.video, other]))
+        self.assertEqual(entry[0]["missing"], [other])
+
+    def test_explicit_paths_skip_the_confirmation(self):
+        self.write(".en.srt", "old")
+        searched = []
+
+        def fake_save(subdl, client, logged_in, video, dest, trace):
+            searched.append(video)
+            return False
+        sub_fetcher._try_save_eng = fake_save
+
+        sub_fetcher.do_download_english("Film", {}, paths=[self.video])
+        self.assertEqual(searched, [self.video])
+
+    def test_empty_explicit_paths_reports_nothing_to_do(self):
+        called = []
+        sub_fetcher._try_save_eng = lambda *a, **k: called.append(1)
+        sub_fetcher.do_download_english("Film", {}, paths=[])
+        self.assertEqual(called, [])
+
+    def test_summary_counts_hits_and_misses(self):
+        other = os.path.join(self.moviedir, "Film (2001) part2.mkv")
+        open(other, "w").close()
+
+        def fake_save(subdl, client, logged_in, video, dest, trace):
+            if video == self.video:
+                with open(dest, "w") as f:
+                    f.write("new")
+                return True
+            return False
+        sub_fetcher._try_save_eng = fake_save
+
+        sub_fetcher.do_download_english("Film", {}, progress_msg_id=42)
+        final = self.edited[-1][1]
+        self.assertIn("1", final)
+        self.assertIn("2", final)
+
+
 if __name__ == "__main__":
     unittest.main()
