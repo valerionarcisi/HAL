@@ -920,18 +920,30 @@ def scan_missing(state, excludes):
 
                 full_path = os.path.join(root, fname)
 
-                if has_italian_sub(full_path):
+                has_en = find_english_sub(full_path) is not None
+
+                if has_italian_sub(full_path) and has_en:
                     continue
 
                 if is_excluded(full_path, excludes):
                     continue
 
+                # Italian audio/original still need the EN sub (VO guarantee) —
+                # only skip once both subs are present.
                 if has_italian_audio(full_path):
-                    log.info(f"  Skipping (Italian audio): {fname}")
+                    if has_en:
+                        log.info(f"  Skipping (Italian audio, EN sub present): {fname}")
+                        continue
+                    log.info(f"  Italian audio but EN sub missing, queuing EN-only: {fname}")
+                    missing.append(full_path)
                     continue
 
                 # Cached "Italian original via TMDb" — set on first detection.
                 if full_path in state.get("italian_original", {}):
+                    if has_en:
+                        continue
+                    log.info(f"  Italian original but EN sub missing, queuing EN-only: {fname}")
+                    missing.append(full_path)
                     continue
 
                 # Check state
@@ -947,16 +959,24 @@ def scan_missing(state, excludes):
                         continue  # Download failed, wait before retrying
 
                 if full_path in state["downloaded"]:
-                    continue  # Already downloaded
+                    if has_en:
+                        continue  # Already downloaded, VO guarantee satisfied
+                    log.info(f"  Already downloaded but EN sub missing, queuing EN-only: {fname}")
+                    missing.append(full_path)
+                    continue
 
                 # New video — check TMDb for Italian original_language.
                 # Cached afterwards so we don't re-query at every scan.
                 if is_italian_original(full_path):
-                    log.info(f"  Skipping (Italian original via TMDb): {fname}")
                     state.setdefault("italian_original", {})[full_path] = {
                         "time": datetime.now().isoformat(),
                     }
                     save_state(state)
+                    if has_en:
+                        log.info(f"  Skipping (Italian original via TMDb): {fname}")
+                        continue
+                    log.info(f"  Italian original but EN sub missing, queuing EN-only: {fname}")
+                    missing.append(full_path)
                     continue
 
                 _notify_new_media(state, full_path, media_path)
@@ -5608,7 +5628,7 @@ def do_retranslate(query, state, progress_msg_id=None):
     if deleted == 0:
         warn = f"⚠️ Nessuna traduzione da rifare per '<b>{query}</b>'."
         if no_en:
-            warn += f"\n{no_en} video hanno .it.srt ma manca .en.srt — usa /cancella per ri-cercare."
+            warn += f"\n{no_en} video hanno .it.srt ma manca .en.srt — usa /subeng per scaricarlo senza toccare l'ITA."
         if progress_msg_id:
             tg_edit_message(progress_msg_id, warn)
         else:
@@ -7038,31 +7058,53 @@ def do_batch_download(paths, state, progress_msg_id=None):
     en_names = []
     failed_names = []
 
-    for i, video_path in enumerate(paths):
-        if has_italian_sub(video_path):
-            ita_found += 1
-            ita_names.append(friendly_name(video_path))
-            continue
+    subdl = SubdlClient()
+    client = OSClient()
+    os_logged_in = client.login()
 
-        if progress_msg_id and (i % 3 == 0 or i == total - 1):
-            bar = _progress_bar(i, total)
-            tg_edit_message(progress_msg_id,
-                f"⬇️ <b>Scaricando sottotitoli...</b>\n\n"
-                f"{bar}\n"
-                f"📊 {i}/{total} — 🇮🇹 {ita_found} | 🇬🇧 {en_found} | ❌ {not_found}")
+    try:
+        for i, video_path in enumerate(paths):
+            has_it = has_italian_sub(video_path)
+            has_en = find_english_sub(video_path) is not None
 
-        result = do_download(video_path, state, silent=True, translate=False)
-        if result is True:
-            ita_found += 1
-            ita_names.append(friendly_name(video_path))
-        elif result == "en_only":
-            en_found += 1
-            en_paths.append(video_path)
-            en_names.append(friendly_name(video_path))
-        else:
-            not_found += 1
-            failed_names.append(friendly_name(video_path))
-        time.sleep(1)
+            if has_it and has_en:
+                ita_found += 1
+                ita_names.append(friendly_name(video_path))
+                continue
+
+            if progress_msg_id and (i % 3 == 0 or i == total - 1):
+                bar = _progress_bar(i, total)
+                tg_edit_message(progress_msg_id,
+                    f"⬇️ <b>Scaricando sottotitoli...</b>\n\n"
+                    f"{bar}\n"
+                    f"📊 {i}/{total} — 🇮🇹 {ita_found} | 🇬🇧 {en_found} | ❌ {not_found}")
+
+            if has_it and not has_en:
+                # VO guarantee: IT already present, just backfill the EN sub.
+                if replace_english_sub(subdl, client, os_logged_in, video_path):
+                    ita_found += 1
+                    ita_names.append(friendly_name(video_path))
+                else:
+                    not_found += 1
+                    failed_names.append(friendly_name(video_path))
+                time.sleep(1)
+                continue
+
+            result = do_download(video_path, state, silent=True, translate=False)
+            if result is True:
+                ita_found += 1
+                ita_names.append(friendly_name(video_path))
+            elif result == "en_only":
+                en_found += 1
+                en_paths.append(video_path)
+                en_names.append(friendly_name(video_path))
+            else:
+                not_found += 1
+                failed_names.append(friendly_name(video_path))
+            time.sleep(1)
+    finally:
+        if os_logged_in:
+            client.logout()
 
     # Build summary
     summary = f"📊 <b>Download completato</b>\n\n"
