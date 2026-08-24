@@ -6095,7 +6095,7 @@ def _cmd_aiuto(arg, state, excludes):
     section_order = ["Cerca & scarica", "Gestione sub", "Stato & manutenzione"]
     emoji = {"Cerca & scarica": "🔍", "Gestione sub": "🔄", "Stato & manutenzione": "ℹ️"}
 
-    lines = ["🤖 <b>Sub ITA Fetcher — comandi</b>"]
+    lines = ["🤖 <b>HAL — comandi</b>"]
     for section in section_order:
         cmds = groups.get(section, [])
         if not cmds:
@@ -7528,7 +7528,7 @@ def queue_position():
 
 
 def main():
-    log.info("=== Sub ITA Fetcher starting ===")
+    log.info("=== HAL starting ===")
     log.info(f"Series path: {SERIES_PATH}")
     log.info(f"Films path: {FILMS_PATH}")
     log.info(f"Scan interval: {SCAN_INTERVAL}s")
@@ -7541,7 +7541,7 @@ def main():
     worker.start()
 
     # Send startup message
-    tg_send("🚀 <b>Sub ITA Fetcher avviato!</b>\nDigita /help per i comandi.")
+    tg_send("🚀 <b>HAL avviato!</b>\nDigita /help per i comandi.")
 
     while True:
         try:
@@ -7563,7 +7563,7 @@ def main():
 
         except KeyboardInterrupt:
             log.info("Shutting down...")
-            tg_send("🛑 Sub ITA Fetcher spento.")
+            tg_send("🛑 HAL spento.")
             break
         except Exception as e:
             log.error(f"Main loop error: {e}", exc_info=True)
