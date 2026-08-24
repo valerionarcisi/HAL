@@ -45,7 +45,7 @@ Phase 2 (PAID, user confirms):
 
 - **Telegram Bot**: Create via [@BotFather](https://t.me/BotFather)
 - **Subdl.com**: Register at [subdl.com](https://subdl.com) for a free API key
-- **OpenSubtitles.com** (recommended): Register at [opensubtitles.com](https://www.opensubtitles.com), then create an API consumer at `/en/consumers` with `dev_mode` enabled (100 downloads/day free). Copy the API key.
+- **OpenSubtitles.com** (recommended): Register at [opensubtitles.com](https://www.opensubtitles.com), then create an API consumer at `/en/consumers` with `dev_mode` enabled (100 downloads/day free). Copy the API key. Optionally add your account username/password (`OS_USERNAME`/`OS_PASSWORD`) to raise the daily download quota.
 - **TMDb** (recommended): Register at [themoviedb.org](https://www.themoviedb.org/settings/api), request a Developer key (free, unlimited). Used to resolve IMDb IDs from title + year.
 - **DeepL API** (recommended for translation): Register at [deepl.com/pro-api](https://www.deepl.com/pro-api) — Free tier gives 500k chars/month (≈10 films). Key ends with `:fx` for free, plain for paid.
 - **Claude API** (optional): Get from [console.anthropic.com](https://console.anthropic.com). Used as fallback if DeepL is missing, and (with Haiku 4.5) to polish unnatural lines in DeepL output.
@@ -71,17 +71,25 @@ hal:
     - TELEGRAM_CHAT_ID=your_chat_id
     - SUBDL_API_KEY=your_subdl_key
     - OPENSUBTITLES_API_KEY=your_opensubtitles_consumer_key   # recommended
+    - OS_USERNAME=your_opensubtitles_username                 # optional, raises download quota
+    - OS_PASSWORD=your_opensubtitles_password                 # optional, raises download quota
     - TMDB_API_KEY=your_tmdb_v3_api_key                       # recommended
     - DEEPL_API_KEY=your_deepl_key                            # recommended (free tier OK)
     - CLAUDE_API_KEY=your_claude_key                          # optional (polish + fallback)
+    - CLAUDE_MODEL=claude-sonnet-4-20250514                   # optional, default shown (fallback translate)
+    - CLAUDE_POLISH_MODEL=claude-haiku-4-5-20251001           # optional, default shown (polish pass)
     - POLISH_TRANSLATION=true                                 # optional, default true
     - RADARR_URL=http://radarr:7878                           # optional, enables /scarica
     - RADARR_API_KEY=your_radarr_key                          # optional, enables /scarica
+    - RADARR_ROOT_FOLDER=/media/films                         # optional, defaults to Radarr's own default
+    - RADARR_QUALITY_PROFILE=HD-1080p                         # optional, defaults to Radarr's own default
     - RADARR_PREFERRED_LANGUAGES=ITA,ENG                      # optional, default ITA,ENG
     # /cerca (multi-source film download) — optional overrides
     - YT_COOKIES_FILE=/config/secrets/yt_cookies.txt          # optional, default shown
+    - YTDLP_BINARY=yt-dlp                                     # optional, default shown
     - CERCA_DOWNLOAD_DIR=/media/films                         # optional, default shown
     - CERCA_MIN_RESOLUTION=720                                # optional, default 720
+    - CERCA_FALLBACK_RESOLUTION=480                            # optional, default 480 (used if no result at MIN_RESOLUTION)
 ```
 
 For `/cerca` to use YouTube reliably, drop a Netscape cookies.txt at `hal/secrets/yt_cookies.txt` on the host. The directory is gitignored (`secrets/` in `.gitignore`). yt-dlp uses those cookies to bypass age-gate / consent walls. Without cookies, archive.org still works.
@@ -165,7 +173,7 @@ Single Python file (`hal.py`), no frameworks. Runs as a long-lived process insid
 
 ```
 hal.py           # Main application (single file)
-test_hal.py      # Unit tests (55 tests)
+test_hal.py      # Unit tests (416 tests)
 Dockerfile               # Container definition
 SPEC.md                  # Technical specification
 AGENTS.md                # Agent/AI coding guidelines
