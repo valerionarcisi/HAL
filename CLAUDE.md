@@ -1,4 +1,4 @@
-# Sub ITA Fetcher — CLAUDE.md
+# HAL — CLAUDE.md
 
 Project-level guidance for AI agents (Claude Code, etc.) working in this repo. Read this FIRST, before touching any file.
 
@@ -21,7 +21,7 @@ Telegram-interactive Italian subtitle downloader. Long-lived Docker container on
 3. When only EN is found, asks the user via Telegram whether to translate (DeepL → optional Claude polish, or full Claude as fallback)
 4. Exposes Telegram commands for manual search, sync, retranslation, deletion, status, costs, Radarr-driven new-film requests (`/scarica`)
 
-Single-file Python 3.11 app: `sub_fetcher.py` (~177 KB). Single-file test suite: `test_sub_fetcher.py` (~92 KB, stdlib `unittest` only, 55+ cases).
+Single-file Python 3.11 app: `hal.py` (~177 KB). Single-file test suite: `test_hal.py` (~92 KB, stdlib `unittest` only, 55+ cases).
 
 ---
 
@@ -36,7 +36,7 @@ Single-file Python 3.11 app: `sub_fetcher.py` (~177 KB). Single-file test suite:
 +--------+---------+        +----------+--------+
          |                              |
          v                              v
-  state.json     batches.json     requests.json     sub_fetcher.log
+  state.json     batches.json     requests.json     hal.log
   (asked,        (pending         (Radarr pending   (rotating)
    downloaded,   batches +        film requests,
    failed,       release lists)   separate from
@@ -87,12 +87,12 @@ These are non-negotiable. If you are about to do any of these, stop and ask.
 ## 4. Workflow — every change
 
 1. **Read** `SPEC.md` for the feature you're touching. If the spec is silent, the implementation is authoritative.
-2. **Read the relevant function(s)** in `sub_fetcher.py` end-to-end before editing. Functions are big; partial edits cause silent breakage.
-3. **Write the test first** in `test_sub_fetcher.py` (mirror the existing style: stdlib only, mock HTTP via `unittest.mock`, patch `/config` paths to a temp dir).
+2. **Read the relevant function(s)** in `hal.py` end-to-end before editing. Functions are big; partial edits cause silent breakage.
+3. **Write the test first** in `test_hal.py` (mirror the existing style: stdlib only, mock HTTP via `unittest.mock`, patch `/config` paths to a temp dir).
 4. **Implement the change.** Self-documenting names. Comments only for *why*, never for *what*.
 5. **Run the full test suite** before considering the change done:
    ```bash
-   python3 -m unittest test_sub_fetcher -v
+   python3 -m unittest test_hal -v
    ```
 6. **Update docs** if behaviour changes:
    - `SPEC.md` — if you changed a flow, a provider contract, a state field, or an env var
@@ -101,8 +101,8 @@ These are non-negotiable. If you are about to do any of these, stop and ask.
 7. **Commit.** Follow the conventions in §8. The tracked pre-commit hook runs the test suite — do not skip it (`--no-verify` is forbidden).
 8. **Rebuild + restart on the NAS:**
    ```bash
-   docker compose up -d --build sub-fetcher
-   docker logs -f sub-fetcher --tail 100
+   docker compose up -d --build hal
+   docker logs -f hal --tail 100
    ```
 
 ---
@@ -167,9 +167,9 @@ Three persistent JSON files, each with a specific owner:
 ### How to run
 
 ```bash
-python3 -m unittest test_sub_fetcher -v          # full suite
-python3 -m unittest test_sub_fetcher.TestParseVideo -v   # one class
-python3 -m unittest test_sub_fetcher.TestParseVideo.test_movie_with_year_in_parens -v  # one case
+python3 -m unittest test_hal -v          # full suite
+python3 -m unittest test_hal.TestParseVideo -v   # one class
+python3 -m unittest test_hal.TestParseVideo.test_movie_with_year_in_parens -v  # one case
 ```
 
 ### Conventions
@@ -262,8 +262,8 @@ Legacy (kept as no-ops, do not wire):
 ## 11. Where things live (file map)
 
 ```
-sub_fetcher.py          # Single-file app. ~177 KB. Read it whole before editing.
-test_sub_fetcher.py     # Single-file test suite. ~92 KB. Stdlib only.
+hal.py          # Single-file app. ~177 KB. Read it whole before editing.
+test_hal.py     # Single-file test suite. ~92 KB. Stdlib only.
 Dockerfile              # python:3.11-slim + ffmpeg + ffsubsync. Multi-stage purge of gcc after build.
 SPEC.md                 # Full technical spec. Authoritative on flow + provider contracts.
 README.md               # User-facing setup + commands.
@@ -280,7 +280,7 @@ Runtime files (on NAS, not in repo):
 /config/state.json        # Persistent state. Owned by main thread.
 /config/batches.json      # Pending batches. Either thread.
 /config/requests.json     # Pending Radarr requests. Either thread.
-/config/sub_fetcher.log   # Rotating log.
+/config/hal.log   # Rotating log.
 /media/series/            # Read-only mount.
 /media/films/             # Read-only mount.
 ```

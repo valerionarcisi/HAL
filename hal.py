@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sub_fetcher.py — Telegram-interactive Italian subtitle downloader
+hal.py — Telegram-interactive Italian subtitle downloader
 Scans media folders, finds videos missing Italian subs, asks via Telegram
 whether to download them, and saves them with the correct filename.
 
@@ -116,7 +116,7 @@ STATE_FILE = "/config/state.json"
 BATCHES_FILE = "/config/batches.json"
 REQUESTS_FILE = "/config/requests.json"
 AUDIO_CACHE_FILE = "/config/release_audio_cache.json"
-LOG_FILE = "/config/sub_fetcher.log"
+LOG_FILE = "/config/hal.log"
 
 # Timing
 SCAN_INTERVAL = 300  # 5 minutes
@@ -144,7 +144,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
-log = logging.getLogger("sub_fetcher")
+log = logging.getLogger("hal")
 
 # =============================================================================
 # STATE
@@ -1138,7 +1138,7 @@ class SubdlClient:
                 params["episode_number"] = str(episode)
 
             url = SUBDL_API_URL + "?" + urllib.parse.urlencode(params)
-            req = urllib.request.Request(url, headers={"User-Agent": "SubFetcher/1.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "HAL/1.0"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
@@ -1172,7 +1172,7 @@ class SubdlClient:
             else:
                 url = f"https://dl.subdl.com/subtitle/{url_path}"
             log.info(f"  Subdl download URL: {url}")
-            req = urllib.request.Request(url, headers={"User-Agent": "SubFetcher/1.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "HAL/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 zip_data = resp.read()
 

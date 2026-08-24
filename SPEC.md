@@ -1,4 +1,4 @@
-# Sub ITA Fetcher - Technical Specification
+# HAL - Technical Specification
 
 ## Full Flow Overview
 
@@ -289,11 +289,11 @@ Type any text in Telegram to search. Handles dots/underscores in filenames (e.g.
 
 ## File Structure
 ```
-/app/sub_fetcher.py          # Main application
+/app/hal.py          # Main application
 /config/state.json           # Persistent state (asked, downloaded, last_offset, claude_costs)
 /config/batches.json         # Pending download/translate batches (separate file to avoid race conditions)
 /config/exclude_folders.txt  # Excluded folders list
-/config/sub_fetcher.log      # Application log
+/config/hal.log      # Application log
 /media/series/               # Series (read-only mount)
 /media/films/                # Films (read-only mount)
 ```
@@ -307,7 +307,7 @@ The main loop and the queue worker run in separate threads and both read/write p
 - The previous bug: batches were stored inside `state["batches"]`. The main thread's unconditional `save_state()` call at the end of `process_callbacks` used a stale in-memory state without the queue worker's newly-added batches, silently wiping them. Moving batches to a separate file eliminates this entirely.
 
 ## Testing
-Run: `python3 -m unittest test_sub_fetcher -v`
+Run: `python3 -m unittest test_hal -v`
 
 ### Pre-commit hook
 The repo ships a tracked hook at `.githooks/pre-commit` that runs the full test suite before every commit. On first clone, activate it once:
@@ -392,7 +392,7 @@ Bot:   POST /api/v3/release  { guid, indexerId }
         ↓
 Bot:   "📥 In download via <indexer>. Ti avviso quando arriva il file + sub ITA."
         ↓
-        (existing sub-fetcher scan picks up the .mkv when the *arr stack finishes,
+        (existing hal scan picks up the .mkv when the *arr stack finishes,
          the normal subtitle download / translation flow runs)
         ↓
 Bot:   "✅ Pronto: Punch-Drunk Love (2002) — sub ITA scaricato"
@@ -409,7 +409,7 @@ Bot:   "✅ Pronto: Punch-Drunk Love (2002) — sub ITA scaricato"
 **Out of scope**
 - Listing / cancelling pending Radarr requests from Telegram (use Radarr UI).
 - Authentication / multi-user. The bot already trusts `TELEGRAM_CHAT_ID`.
-- Mapping the eventual download back to a specific Telegram message ID (the sub-fetcher's existing scan-and-notify is good enough).
+- Mapping the eventual download back to a specific Telegram message ID (the hal's existing scan-and-notify is good enough).
 
 ### New components
 1. **`RadarrClient`** — minimal wrapper around Radarr v3 REST API:
@@ -418,7 +418,7 @@ Bot:   "✅ Pronto: Punch-Drunk Love (2002) — sub ITA scaricato"
    - `releases(movie_id) -> list[Release]` — GET `/release?movieId=<id>`. Triggers Radarr's Interactive Search across all configured indexers and returns the deduplicated list. Each entry exposes: `guid`, `indexerId`, `indexer` (display name), `title` (release name), `size` (bytes), `seeders`, `leechers`, `quality.quality.name` (e.g. "Bluray-1080p"), `languages` (list of `{id, name}`), `rejections` (list — Radarr's reasons not to grab, e.g. "Already imported"). Surface rejections to the user as warning badges, don't filter them out.
    - `grab(guid, indexer_id) -> dict` — POST `/release` with the chosen guid + indexerId. Radarr forwards to the download client.
 
-2. **Release ranking & formatting** (sub-fetcher side):
+2. **Release ranking & formatting** (hal side):
    - Sort by: (a) preferred-language matches first, (b) quality tier (2160p > 1080p > 720p), (c) seeders desc.
    - Detect language from `release.languages` first; fall back to substring match on the release title (`ITA`, `ITALIAN`, `iTALiAN`, `ENG`, `MULTI`). Show flag emoji per inferred language.
    - Truncate the release name to ~80 chars for the inline-button label (Telegram limits button text length); the **full** release name is shown in the confirmation card on the next step.

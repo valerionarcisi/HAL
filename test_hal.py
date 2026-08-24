@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for sub_fetcher improvements."""
+"""Unit tests for hal improvements."""
 
 import os
 import sys
@@ -26,22 +26,22 @@ os.environ["TELEGRAM_CHAT_ID"] = "0"
 # Read the source and exec with patched paths
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Patch: create a modified version of sub_fetcher with overridden paths
-_src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sub_fetcher.py")
+# Patch: create a modified version of hal with overridden paths
+_src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hal.py")
 with open(_src_path, "r") as f:
     _src = f.read()
 
 # Replace hardcoded /config paths
 _src = _src.replace('"/config"', f'"{_test_config}"')
 _src = _src.replace("STATE_FILE = ", f'STATE_FILE = "{_test_config}/state.json"  # ')
-_src = _src.replace("LOG_FILE = ", f'LOG_FILE = "{_test_config}/sub_fetcher.log"  # ')
+_src = _src.replace("LOG_FILE = ", f'LOG_FILE = "{_test_config}/hal.log"  # ')
 _src = _src.replace("EXCLUDE_FOLDERS_FILE = ", f'EXCLUDE_FOLDERS_FILE = "{_test_config}/exclude_folders.txt"  # ')
 
 import types
-sub_fetcher = types.ModuleType("sub_fetcher")
-sub_fetcher.__file__ = _src_path
-exec(compile(_src, _src_path, "exec"), sub_fetcher.__dict__)
-sys.modules["sub_fetcher"] = sub_fetcher
+hal = types.ModuleType("hal")
+hal.__file__ = _src_path
+exec(compile(_src, _src_path, "exec"), hal.__dict__)
+sys.modules["hal"] = hal
 
 
 class TestFindImdbId(unittest.TestCase):
@@ -62,7 +62,7 @@ class TestFindImdbId(unittest.TestCase):
         video = os.path.join(season_dir, "MyShow.S01E01.mkv")
         open(video, "w").close()
 
-        result = sub_fetcher.find_imdb_id(video)
+        result = hal.find_imdb_id(video)
         self.assertEqual(result, "tt1234567")
 
     def test_finds_imdb_from_episode_nfo(self):
@@ -75,7 +75,7 @@ class TestFindImdbId(unittest.TestCase):
         video = os.path.join(d, "video.mkv")
         open(video, "w").close()
 
-        result = sub_fetcher.find_imdb_id(video)
+        result = hal.find_imdb_id(video)
         self.assertEqual(result, "tt9876543")
 
     def test_returns_none_when_no_nfo(self):
@@ -84,7 +84,7 @@ class TestFindImdbId(unittest.TestCase):
         video = os.path.join(d, "video.mkv")
         open(video, "w").close()
 
-        result = sub_fetcher.find_imdb_id(video)
+        result = hal.find_imdb_id(video)
         self.assertIsNone(result)
 
     def test_returns_none_when_nfo_has_no_imdb(self):
@@ -97,7 +97,7 @@ class TestFindImdbId(unittest.TestCase):
         video = os.path.join(d, "video.mkv")
         open(video, "w").close()
 
-        result = sub_fetcher.find_imdb_id(video)
+        result = hal.find_imdb_id(video)
         self.assertIsNone(result)
 
 
@@ -127,7 +127,7 @@ Non sono sicuro di questo.
 00:00:07,000 --> 00:00:09,000
 Anche per me è una cosa strana.
 """)
-        self.assertEqual(sub_fetcher.detect_language_from_srt(srt), "it")
+        self.assertEqual(hal.detect_language_from_srt(srt), "it")
 
     def test_detects_english(self):
         srt = self._write_srt("test.srt", """1
@@ -142,14 +142,14 @@ I was not sure about that.
 00:00:07,000 --> 00:00:09,000
 They have been there for a while.
 """)
-        self.assertEqual(sub_fetcher.detect_language_from_srt(srt), "en")
+        self.assertEqual(hal.detect_language_from_srt(srt), "en")
 
     def test_returns_unknown_for_ambiguous(self):
         srt = self._write_srt("test.srt", "123\n")
-        self.assertEqual(sub_fetcher.detect_language_from_srt(srt), "unknown")
+        self.assertEqual(hal.detect_language_from_srt(srt), "unknown")
 
     def test_handles_missing_file(self):
-        self.assertEqual(sub_fetcher.detect_language_from_srt("/nonexistent.srt"), "unknown")
+        self.assertEqual(hal.detect_language_from_srt("/nonexistent.srt"), "unknown")
 
 
 class TestFindExistingSrt(unittest.TestCase):
@@ -166,7 +166,7 @@ class TestFindExistingSrt(unittest.TestCase):
         with open(en_srt, "w") as f:
             f.write("1\n00:00:01,000 --> 00:00:02,000\nHello\n")
 
-        result = sub_fetcher.find_existing_srt(video)
+        result = hal.find_existing_srt(video)
         self.assertIsNotNone(result)
         self.assertEqual(result["lang"], "en")
         self.assertEqual(result["path"], en_srt)
@@ -180,7 +180,7 @@ class TestFindExistingSrt(unittest.TestCase):
                     "2\n00:00:04,000 --> 00:00:06,000\nThey have been there.\n\n"
                     "3\n00:00:07,000 --> 00:00:09,000\nThis was not the right time.\n")
 
-        result = sub_fetcher.find_existing_srt(video)
+        result = hal.find_existing_srt(video)
         self.assertIsNotNone(result)
         self.assertEqual(result["lang"], "en")
 
@@ -188,7 +188,7 @@ class TestFindExistingSrt(unittest.TestCase):
         video = os.path.join(self.tmpdir, "Movie.2024.mkv")
         open(video, "w").close()
 
-        result = sub_fetcher.find_existing_srt(video)
+        result = hal.find_existing_srt(video)
         self.assertIsNone(result)
 
     def test_skips_italian_tagged_srt(self):
@@ -198,81 +198,81 @@ class TestFindExistingSrt(unittest.TestCase):
         with open(ita_srt, "w") as f:
             f.write("1\n00:00:01,000 --> 00:00:02,000\nCiao\n")
 
-        result = sub_fetcher.find_existing_srt(video)
+        result = hal.find_existing_srt(video)
         self.assertIsNone(result)
 
 
 class TestGetSearchQueries(unittest.TestCase):
     def test_episode_with_different_folder(self):
         path = "/media/series/PLUR1BUS/Pluribus.S01E01.720p.x264-FENiX.mkv"
-        queries = sub_fetcher.get_search_queries(path)
+        queries = hal.get_search_queries(path)
         self.assertIn("Pluribus", queries)
         self.assertTrue(any("PLUR" in q.upper() for q in queries))
 
     def test_episode_same_name(self):
         path = "/media/series/The Chosen/Season 1/The.Chosen.S01E01.mkv"
-        queries = sub_fetcher.get_search_queries(path)
+        queries = hal.get_search_queries(path)
         self.assertEqual(queries[0], "The Chosen")
 
     def test_movie(self):
         path = "/media/films/Birdman (2014)/Birdman.2014.1080p.mkv"
-        queries = sub_fetcher.get_search_queries(path)
+        queries = hal.get_search_queries(path)
         self.assertEqual(queries[0], "Birdman")
 
     def test_deduplication(self):
         path = "/media/series/Pluribus/Pluribus.S01E01.mkv"
-        queries = sub_fetcher.get_search_queries(path)
+        queries = hal.get_search_queries(path)
         lower_queries = [q.lower() for q in queries]
         self.assertEqual(len(lower_queries), len(set(lower_queries)))
 
 
 class TestParseVideo(unittest.TestCase):
     def test_episode(self):
-        result = sub_fetcher.parse_video("/media/series/PLUR1BUS/Pluribus.S01E05.720p.x264-FENiX.mkv")
+        result = hal.parse_video("/media/series/PLUR1BUS/Pluribus.S01E05.720p.x264-FENiX.mkv")
         self.assertEqual(result["type"], "episode")
         self.assertEqual(result["name"], "Pluribus")
         self.assertEqual(result["season"], 1)
         self.assertEqual(result["episode"], 5)
 
     def test_movie(self):
-        result = sub_fetcher.parse_video("/media/films/Birdman (2014)/Birdman.2014.1080p.BluRay.mkv")
+        result = hal.parse_video("/media/films/Birdman (2014)/Birdman.2014.1080p.BluRay.mkv")
         self.assertEqual(result["type"], "movie")
         self.assertEqual(result["name"], "Birdman")
         self.assertEqual(result["year"], 2014)
 
     def test_unknown_uses_filename_not_parent(self):
-        result = sub_fetcher.parse_video("/media/films/Loro.mp4")
+        result = hal.parse_video("/media/films/Loro.mp4")
         self.assertEqual(result["type"], "unknown")
         self.assertEqual(result["name"], "Loro")
         self.assertNotEqual(result["name"], "films")
 
     def test_movie_year_in_parentheses(self):
-        result = sub_fetcher.parse_video("/media/films/Punch-Drunk Love (2002).mkv")
+        result = hal.parse_video("/media/films/Punch-Drunk Love (2002).mkv")
         self.assertEqual(result["type"], "movie")
         self.assertEqual(result["name"], "Punch-Drunk Love")
         self.assertEqual(result["year"], 2002)
 
     def test_movie_strips_scraper_prefix(self):
-        result = sub_fetcher.parse_video("/media/films/www.SceneTime.com - Punch-Drunk Love (2002).mkv")
+        result = hal.parse_video("/media/films/www.SceneTime.com - Punch-Drunk Love (2002).mkv")
         self.assertEqual(result["type"], "movie")
         self.assertEqual(result["name"], "Punch-Drunk Love")
         self.assertEqual(result["year"], 2002)
 
     def test_movie_strips_bracket_tracker_tag(self):
-        result = sub_fetcher.parse_video("/media/films/[YTS.MX] Gummo (1997).mkv")
+        result = hal.parse_video("/media/films/[YTS.MX] Gummo (1997).mkv")
         self.assertEqual(result["type"], "movie")
         self.assertEqual(result["name"], "Gummo")
         self.assertEqual(result["year"], 1997)
 
     def test_episode_strips_scraper_prefix(self):
-        result = sub_fetcher.parse_video("/media/series/www.SceneTime.com - Pluribus.S01E05.720p.mkv")
+        result = hal.parse_video("/media/series/www.SceneTime.com - Pluribus.S01E05.720p.mkv")
         self.assertEqual(result["type"], "episode")
         self.assertEqual(result["name"], "Pluribus")
         self.assertEqual(result["season"], 1)
         self.assertEqual(result["episode"], 5)
 
     def test_unknown_cleans_junk_tags(self):
-        result = sub_fetcher.parse_video("/media/films/SomeMovie/SomeMovie.720p.BluRay.x264.mp4")
+        result = hal.parse_video("/media/films/SomeMovie/SomeMovie.720p.BluRay.x264.mp4")
         self.assertEqual(result["type"], "unknown")
         self.assertNotIn("720p", result["name"])
         self.assertIn("SomeMovie", result["name"])
@@ -288,32 +288,32 @@ class TestPlaceholderDetection(unittest.TestCase):
 
     def test_rejects_too_short(self):
         content = self._fake_sub(2)
-        self.assertTrue(sub_fetcher.is_placeholder_sub(content))
+        self.assertTrue(hal.is_placeholder_sub(content))
 
     def test_rejects_strong_pattern_osdb(self):
         content = self._fake_sub(500, "\nVisit osdb.link/vip for more")
-        self.assertTrue(sub_fetcher.is_placeholder_sub(content))
+        self.assertTrue(hal.is_placeholder_sub(content))
 
     def test_rejects_strong_pattern_vip_member(self):
         content = self._fake_sub(500, "\nBecome a VIP member now")
-        self.assertTrue(sub_fetcher.is_placeholder_sub(content))
+        self.assertTrue(hal.is_placeholder_sub(content))
 
     def test_accepts_real_sub_with_opensubtitles_credit(self):
         # Real sub with ~500 blocks and "opensubtitles" only in footer credits
         content = self._fake_sub(500, "\nDownloaded from opensubtitles.org\n")
-        self.assertFalse(sub_fetcher.is_placeholder_sub(content))
+        self.assertFalse(hal.is_placeholder_sub(content))
 
     def test_rejects_short_sub_with_opensubtitles_keyword(self):
         content = self._fake_sub(10, "\nopensubtitles")
-        self.assertTrue(sub_fetcher.is_placeholder_sub(content))
+        self.assertTrue(hal.is_placeholder_sub(content))
 
     def test_accepts_long_real_sub(self):
         content = self._fake_sub(800)
-        self.assertFalse(sub_fetcher.is_placeholder_sub(content))
+        self.assertFalse(hal.is_placeholder_sub(content))
 
     def test_rejects_single_block_long_span(self):
         content = b"1\n00:00:00,000 --> 05:00:00,000\nAd\n\n2\n00:00:01,000 --> 00:00:02,000\n.\n\n3\n00:00:03,000 --> 00:00:04,000\n.\n"
-        self.assertTrue(sub_fetcher.is_placeholder_sub(content))
+        self.assertTrue(hal.is_placeholder_sub(content))
 
 
 class TestOSClientRestMapping(unittest.TestCase):
@@ -329,7 +329,7 @@ class TestOSClientRestMapping(unittest.TestCase):
                 "files": [{"file_id": 987, "file_name": "Punch-Drunk.Love.srt"}],
             }
         }
-        legacy = sub_fetcher.OSClient._to_legacy(item)
+        legacy = hal.OSClient._to_legacy(item)
         self.assertEqual(legacy["SubFileName"], "Punch-Drunk.Love.srt")
         self.assertEqual(legacy["MovieReleaseName"], "Punch-Drunk.Love.2002.1080p.BluRay.x264-DEPTH")
         self.assertEqual(legacy["IDSubtitleFile"], "987")
@@ -340,34 +340,34 @@ class TestOSClientRestMapping(unittest.TestCase):
 
     def test_marks_hash_matches(self):
         item = {"attributes": {"moviehash_match": True, "files": [{"file_id": 1, "file_name": "x.srt"}]}}
-        legacy = sub_fetcher.OSClient._to_legacy(item)
+        legacy = hal.OSClient._to_legacy(item)
         self.assertEqual(legacy["MatchedBy"], "moviehash")
 
     def test_handles_empty_files(self):
         item = {"attributes": {"release": "Foo", "files": []}}
-        legacy = sub_fetcher.OSClient._to_legacy(item)
+        legacy = hal.OSClient._to_legacy(item)
         self.assertEqual(legacy["SubFileName"], "Foo")
         self.assertEqual(legacy["IDSubtitleFile"], "")
 
     def test_handles_missing_attributes(self):
-        legacy = sub_fetcher.OSClient._to_legacy({})
+        legacy = hal.OSClient._to_legacy({})
         self.assertEqual(legacy["SubFileName"], "")
         self.assertEqual(legacy["SubDownloadsCnt"], 0)
 
 
 class TestTmdbLookup(unittest.TestCase):
     def test_returns_none_without_api_key(self):
-        original = sub_fetcher.TMDB_API_KEY
-        sub_fetcher.TMDB_API_KEY = ""
+        original = hal.TMDB_API_KEY
+        hal.TMDB_API_KEY = ""
         try:
-            self.assertIsNone(sub_fetcher.tmdb_find_imdb_id("Whatever", 2020))
+            self.assertIsNone(hal.tmdb_find_imdb_id("Whatever", 2020))
         finally:
-            sub_fetcher.TMDB_API_KEY = original
+            hal.TMDB_API_KEY = original
 
     def test_resolves_imdb_id_via_two_calls(self):
         from unittest.mock import patch, MagicMock
-        original = sub_fetcher.TMDB_API_KEY
-        sub_fetcher.TMDB_API_KEY = "fake"
+        original = hal.TMDB_API_KEY
+        hal.TMDB_API_KEY = "fake"
 
         search_resp = MagicMock()
         search_resp.read.return_value = json.dumps({"results": [{"id": 42}]}).encode()
@@ -381,24 +381,24 @@ class TestTmdbLookup(unittest.TestCase):
 
         try:
             with patch("urllib.request.urlopen", side_effect=[search_resp, ext_resp]):
-                result = sub_fetcher.tmdb_find_imdb_id("Punch-Drunk Love", 2002)
+                result = hal.tmdb_find_imdb_id("Punch-Drunk Love", 2002)
             self.assertEqual(result, "tt0272338")
         finally:
-            sub_fetcher.TMDB_API_KEY = original
+            hal.TMDB_API_KEY = original
 
     def test_returns_none_on_empty_search(self):
         from unittest.mock import patch, MagicMock
-        original = sub_fetcher.TMDB_API_KEY
-        sub_fetcher.TMDB_API_KEY = "fake"
+        original = hal.TMDB_API_KEY
+        hal.TMDB_API_KEY = "fake"
         empty_resp = MagicMock()
         empty_resp.read.return_value = json.dumps({"results": []}).encode()
         empty_resp.__enter__ = lambda s: empty_resp
         empty_resp.__exit__ = lambda *a: None
         try:
             with patch("urllib.request.urlopen", return_value=empty_resp):
-                self.assertIsNone(sub_fetcher.tmdb_find_imdb_id("NonExistentMovie", 1900))
+                self.assertIsNone(hal.tmdb_find_imdb_id("NonExistentMovie", 1900))
         finally:
-            sub_fetcher.TMDB_API_KEY = original
+            hal.TMDB_API_KEY = original
 
 
 class TestItalianOriginalDetection(unittest.TestCase):
@@ -416,43 +416,43 @@ class TestItalianOriginalDetection(unittest.TestCase):
 
     def test_get_original_language_returns_it(self):
         from unittest.mock import patch
-        original = sub_fetcher.TMDB_API_KEY
-        sub_fetcher.TMDB_API_KEY = "fake"
+        original = hal.TMDB_API_KEY
+        hal.TMDB_API_KEY = "fake"
         try:
             with patch("urllib.request.urlopen",
                        return_value=self._mock_tmdb_search("it")):
-                lang = sub_fetcher.tmdb_get_original_language("La Grande Bellezza", 2013)
+                lang = hal.tmdb_get_original_language("La Grande Bellezza", 2013)
             self.assertEqual(lang, "it")
         finally:
-            sub_fetcher.TMDB_API_KEY = original
+            hal.TMDB_API_KEY = original
 
     def test_get_original_language_returns_none_without_key(self):
-        original = sub_fetcher.TMDB_API_KEY
-        sub_fetcher.TMDB_API_KEY = ""
+        original = hal.TMDB_API_KEY
+        hal.TMDB_API_KEY = ""
         try:
-            self.assertIsNone(sub_fetcher.tmdb_get_original_language("X", 2020))
+            self.assertIsNone(hal.tmdb_get_original_language("X", 2020))
         finally:
-            sub_fetcher.TMDB_API_KEY = original
+            hal.TMDB_API_KEY = original
 
     def test_is_italian_original_true_for_italian_film(self):
         from unittest.mock import patch
-        with patch.object(sub_fetcher, "tmdb_get_original_language", return_value="it"):
+        with patch.object(hal, "tmdb_get_original_language", return_value="it"):
             self.assertTrue(
-                sub_fetcher.is_italian_original("/media/films/La Grande Bellezza (2013)/film.mkv")
+                hal.is_italian_original("/media/films/La Grande Bellezza (2013)/film.mkv")
             )
 
     def test_is_italian_original_false_for_english_film(self):
         from unittest.mock import patch
-        with patch.object(sub_fetcher, "tmdb_get_original_language", return_value="en"):
+        with patch.object(hal, "tmdb_get_original_language", return_value="en"):
             self.assertFalse(
-                sub_fetcher.is_italian_original("/media/films/Punch-Drunk Love (2002)/film.mkv")
+                hal.is_italian_original("/media/films/Punch-Drunk Love (2002)/film.mkv")
             )
 
     def test_is_italian_original_false_when_tmdb_unknown(self):
         from unittest.mock import patch
-        with patch.object(sub_fetcher, "tmdb_get_original_language", return_value=None):
+        with patch.object(hal, "tmdb_get_original_language", return_value=None):
             self.assertFalse(
-                sub_fetcher.is_italian_original("/media/films/Random Movie (2020)/film.mkv")
+                hal.is_italian_original("/media/films/Random Movie (2020)/film.mkv")
             )
 
     def test_scan_missing_skips_italian_originals_and_caches(self):
@@ -466,12 +466,12 @@ class TestItalianOriginalDetection(unittest.TestCase):
 
             state = {"asked": {}, "downloaded": {}, "italian_original": {}}
 
-            with patch.object(sub_fetcher, "FILMS_PATH", tmp), \
-                 patch.object(sub_fetcher, "SERIES_PATH", "/nonexistent"), \
-                 patch.object(sub_fetcher, "has_italian_audio", return_value=False), \
-                 patch.object(sub_fetcher, "is_italian_original", return_value=True), \
-                 patch.object(sub_fetcher, "save_state"):
-                missing = sub_fetcher.scan_missing(state, excludes=set())
+            with patch.object(hal, "FILMS_PATH", tmp), \
+                 patch.object(hal, "SERIES_PATH", "/nonexistent"), \
+                 patch.object(hal, "has_italian_audio", return_value=False), \
+                 patch.object(hal, "is_italian_original", return_value=True), \
+                 patch.object(hal, "save_state"):
+                missing = hal.scan_missing(state, excludes=set())
             self.assertEqual(missing, [], "Italian-original film must not be in missing list")
             self.assertIn(video, state["italian_original"],
                 "Italian-original detection should be cached in state")
@@ -487,7 +487,7 @@ class TestFindEnglishSub(unittest.TestCase):
             en = os.path.join(tmp, "film.en.srt")
             open(video, "w").close()
             open(en, "w").close()
-            self.assertEqual(sub_fetcher.find_english_sub(video), en)
+            self.assertEqual(hal.find_english_sub(video), en)
         finally:
             shutil.rmtree(tmp)
 
@@ -498,7 +498,7 @@ class TestFindEnglishSub(unittest.TestCase):
             eng = os.path.join(tmp, "film.eng.srt")
             open(video, "w").close()
             open(eng, "w").close()
-            self.assertEqual(sub_fetcher.find_english_sub(video), eng)
+            self.assertEqual(hal.find_english_sub(video), eng)
         finally:
             shutil.rmtree(tmp)
 
@@ -509,7 +509,7 @@ class TestFindEnglishSub(unittest.TestCase):
             english = os.path.join(tmp, "film.english.srt")
             open(video, "w").close()
             open(english, "w").close()
-            self.assertEqual(sub_fetcher.find_english_sub(video), english)
+            self.assertEqual(hal.find_english_sub(video), english)
         finally:
             shutil.rmtree(tmp)
 
@@ -518,7 +518,7 @@ class TestFindEnglishSub(unittest.TestCase):
         try:
             video = os.path.join(tmp, "film.mkv")
             open(video, "w").close()
-            self.assertIsNone(sub_fetcher.find_english_sub(video))
+            self.assertIsNone(hal.find_english_sub(video))
         finally:
             shutil.rmtree(tmp)
 
@@ -531,7 +531,7 @@ class TestFindEnglishSub(unittest.TestCase):
             open(video, "w").close()
             open(en, "w").close()
             open(eng, "w").close()
-            self.assertEqual(sub_fetcher.find_english_sub(video), en)
+            self.assertEqual(hal.find_english_sub(video), en)
         finally:
             shutil.rmtree(tmp)
 
@@ -545,8 +545,8 @@ class TestAutoEnqueueMissing(unittest.TestCase):
         items = []
         while True:
             try:
-                items.append(sub_fetcher.download_queue.get_nowait())
-                sub_fetcher.download_queue.task_done()
+                items.append(hal.download_queue.get_nowait())
+                hal.download_queue.task_done()
             except Empty:
                 break
         return items
@@ -554,12 +554,12 @@ class TestAutoEnqueueMissing(unittest.TestCase):
     def test_single_film_enqueues_single_job(self):
         from unittest.mock import patch
         self._drain_queue()
-        with patch.object(sub_fetcher, "tg_send",
+        with patch.object(hal, "tg_send",
                           return_value={"ok": True, "result": {"message_id": 1}}), \
-             patch.object(sub_fetcher, "save_state"), \
-             patch.object(sub_fetcher, "queue_position", return_value=0), \
+             patch.object(hal, "save_state"), \
+             patch.object(hal, "queue_position", return_value=0), \
              patch("time.sleep"):
-            sub_fetcher.auto_enqueue_missing(
+            hal.auto_enqueue_missing(
                 ["/media/films/Film.2024/Film.2024.mkv"],
                 state={"asked": {}, "downloaded": {}},
             )
@@ -576,12 +576,12 @@ class TestAutoEnqueueMissing(unittest.TestCase):
             "/media/series/Pluribus/Pluribus.S01E02.mkv",
             "/media/series/Pluribus/Pluribus.S01E03.mkv",
         ]
-        with patch.object(sub_fetcher, "tg_send",
+        with patch.object(hal, "tg_send",
                           return_value={"ok": True, "result": {"message_id": 1}}), \
-             patch.object(sub_fetcher, "save_state"), \
-             patch.object(sub_fetcher, "queue_position", return_value=0), \
+             patch.object(hal, "save_state"), \
+             patch.object(hal, "queue_position", return_value=0), \
              patch("time.sleep"):
-            sub_fetcher.auto_enqueue_missing(paths, state={"asked": {}, "downloaded": {}})
+            hal.auto_enqueue_missing(paths, state={"asked": {}, "downloaded": {}})
         items = self._drain_queue()
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["type"], "batch")
@@ -592,12 +592,12 @@ class TestAutoEnqueueMissing(unittest.TestCase):
         from unittest.mock import patch
         self._drain_queue()
         sent = []
-        with patch.object(sub_fetcher, "tg_send",
+        with patch.object(hal, "tg_send",
                           side_effect=lambda *a, **k: sent.append((a, k)) or {"ok": True, "result": {"message_id": 1}}), \
-             patch.object(sub_fetcher, "save_state"), \
-             patch.object(sub_fetcher, "queue_position", return_value=0), \
+             patch.object(hal, "save_state"), \
+             patch.object(hal, "queue_position", return_value=0), \
              patch("time.sleep"):
-            sub_fetcher.auto_enqueue_missing(
+            hal.auto_enqueue_missing(
                 ["/media/films/Film.mkv"],
                 state={"asked": {}, "downloaded": {}},
             )
@@ -614,9 +614,9 @@ class TestOfferDelete(unittest.TestCase):
     def test_no_matches_reports_and_exits(self):
         from unittest.mock import patch
         sent = []
-        with patch.object(sub_fetcher, "find_videos_by_name", return_value=[]), \
-             patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
-            sub_fetcher.offer_delete("Nothing", state={})
+        with patch.object(hal, "find_videos_by_name", return_value=[]), \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
+            hal.offer_delete("Nothing", state={})
         self.assertTrue(any("Nessun video trovato" in str(s) for s in sent))
 
     def test_no_subs_reports_and_exits(self):
@@ -626,9 +626,9 @@ class TestOfferDelete(unittest.TestCase):
             video = os.path.join(tmp, "film.mkv")
             open(video, "w").close()
             sent = []
-            with patch.object(sub_fetcher, "find_videos_by_name", return_value=[video]), \
-                 patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
-                sub_fetcher.offer_delete("film", state={})
+            with patch.object(hal, "find_videos_by_name", return_value=[video]), \
+                 patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
+                hal.offer_delete("film", state={})
             self.assertTrue(any("Nessun sub da cancellare" in str(s) for s in sent))
         finally:
             shutil.rmtree(tmp)
@@ -645,11 +645,11 @@ class TestOfferDelete(unittest.TestCase):
             open(en_sub, "w").close()
             sent = []
             batches_store = {}
-            with patch.object(sub_fetcher, "find_videos_by_name", return_value=[video]), \
-                 patch.object(sub_fetcher, "load_batches", return_value=batches_store), \
-                 patch.object(sub_fetcher, "save_batches", side_effect=lambda b: batches_store.update(b)), \
-                 patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append((a, k))):
-                sub_fetcher.offer_delete("film", state={})
+            with patch.object(hal, "find_videos_by_name", return_value=[video]), \
+                 patch.object(hal, "load_batches", return_value=batches_store), \
+                 patch.object(hal, "save_batches", side_effect=lambda b: batches_store.update(b)), \
+                 patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append((a, k))):
+                hal.offer_delete("film", state={})
             joined = str(sent)
             self.assertIn("delete_yes", joined)
             self.assertIn("delete_no", joined)
@@ -675,7 +675,7 @@ class TestListVideoSubs(unittest.TestCase):
                 p = os.path.join(tmp, "film" + suffix)
                 open(p, "w").close()
                 existing.append(p)
-            self.assertEqual(set(sub_fetcher.list_video_subs(video)), set(existing))
+            self.assertEqual(set(hal.list_video_subs(video)), set(existing))
         finally:
             shutil.rmtree(tmp)
 
@@ -684,7 +684,7 @@ class TestListVideoSubs(unittest.TestCase):
         try:
             video = os.path.join(tmp, "film.mkv")
             open(video, "w").close()
-            self.assertEqual(sub_fetcher.list_video_subs(video), [])
+            self.assertEqual(hal.list_video_subs(video), [])
         finally:
             shutil.rmtree(tmp)
 
@@ -703,10 +703,10 @@ class TestTranslatePrep(unittest.TestCase):
     def test_no_matches_reports_and_exits(self):
         from unittest.mock import patch
         sent = []
-        with patch.object(sub_fetcher, "find_videos_by_name", return_value=[]), \
-             patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append(("send", a, k))), \
-             patch.object(sub_fetcher, "tg_edit_message", side_effect=lambda *a, **k: sent.append(("edit", a, k))):
-            sub_fetcher.do_translate_prep("Nothing", state={}, progress_msg_id=None)
+        with patch.object(hal, "find_videos_by_name", return_value=[]), \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(("send", a, k))), \
+             patch.object(hal, "tg_edit_message", side_effect=lambda *a, **k: sent.append(("edit", a, k))):
+            hal.do_translate_prep("Nothing", state={}, progress_msg_id=None)
         self.assertTrue(sent)
         self.assertIn("Nessun video", str(sent))
 
@@ -717,10 +717,10 @@ class TestTranslatePrep(unittest.TestCase):
             video = os.path.join(tmp, "film.mkv")
             open(video, "w").close()
             sent = []
-            with patch.object(sub_fetcher, "find_videos_by_name", return_value=[video]), \
-                 patch.object(sub_fetcher, "has_italian_sub", return_value=False), \
-                 patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
-                sub_fetcher.do_translate_prep("film", state={}, progress_msg_id=None)
+            with patch.object(hal, "find_videos_by_name", return_value=[video]), \
+                 patch.object(hal, "has_italian_sub", return_value=False), \
+                 patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
+                hal.do_translate_prep("film", state={}, progress_msg_id=None)
             self.assertTrue(any("Senza .en.srt" in str(a) for a in sent))
         finally:
             shutil.rmtree(tmp)
@@ -737,14 +737,14 @@ class TestTranslatePrep(unittest.TestCase):
             sync_mock = MagicMock(return_value={"ok": True})
             sent = []
             batches_store = {}
-            with patch.object(sub_fetcher, "find_videos_by_name", return_value=[video]), \
-                 patch.object(sub_fetcher, "has_italian_sub", return_value=False), \
-                 patch.object(sub_fetcher, "sync_subtitle", sync_mock), \
-                 patch.object(sub_fetcher, "_estimate_batch_translation_cost", return_value=(0.05, 5)), \
-                 patch.object(sub_fetcher, "load_batches", return_value=batches_store), \
-                 patch.object(sub_fetcher, "save_batches", side_effect=lambda b: batches_store.update(b)), \
-                 patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append((a, k)) or {"ok": True, "result": {"message_id": 1}}):
-                sub_fetcher.do_translate_prep("film", state={}, progress_msg_id=None)
+            with patch.object(hal, "find_videos_by_name", return_value=[video]), \
+                 patch.object(hal, "has_italian_sub", return_value=False), \
+                 patch.object(hal, "sync_subtitle", sync_mock), \
+                 patch.object(hal, "_estimate_batch_translation_cost", return_value=(0.05, 5)), \
+                 patch.object(hal, "load_batches", return_value=batches_store), \
+                 patch.object(hal, "save_batches", side_effect=lambda b: batches_store.update(b)), \
+                 patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append((a, k)) or {"ok": True, "result": {"message_id": 1}}):
+                hal.do_translate_prep("film", state={}, progress_msg_id=None)
             sync_mock.assert_called_once_with(video, eng)
             self.assertTrue(any("batch_translate" in str(s) for s in sent))
         finally:
@@ -758,14 +758,14 @@ class TestTranslatePrep(unittest.TestCase):
             sync_mock = MagicMock(return_value={"ok": True})
             sent = []
             batches_store = {}
-            with patch.object(sub_fetcher, "find_videos_by_name", return_value=[video]), \
-                 patch.object(sub_fetcher, "has_italian_sub", return_value=False), \
-                 patch.object(sub_fetcher, "sync_subtitle", sync_mock), \
-                 patch.object(sub_fetcher, "_estimate_batch_translation_cost", return_value=(0.12, 10)), \
-                 patch.object(sub_fetcher, "load_batches", return_value=batches_store), \
-                 patch.object(sub_fetcher, "save_batches", side_effect=lambda b: batches_store.update(b)), \
-                 patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append((a, k)) or {"ok": True, "result": {"message_id": 1}}):
-                sub_fetcher.do_translate_prep("film", state={}, progress_msg_id=None)
+            with patch.object(hal, "find_videos_by_name", return_value=[video]), \
+                 patch.object(hal, "has_italian_sub", return_value=False), \
+                 patch.object(hal, "sync_subtitle", sync_mock), \
+                 patch.object(hal, "_estimate_batch_translation_cost", return_value=(0.12, 10)), \
+                 patch.object(hal, "load_batches", return_value=batches_store), \
+                 patch.object(hal, "save_batches", side_effect=lambda b: batches_store.update(b)), \
+                 patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append((a, k)) or {"ok": True, "result": {"message_id": 1}}):
+                hal.do_translate_prep("film", state={}, progress_msg_id=None)
             sync_mock.assert_called_once_with(video, en)
             self.assertTrue(any("batch_translate" in str(s) for s in sent))
             self.assertTrue(any("0.12" in str(s) for s in sent))
@@ -785,7 +785,7 @@ class TestCascadeSearchUnit(unittest.TestCase):
             def search_name(self, *a, **kw): return []
         client = MockClient()
 
-        results = sub_fetcher._cascade_search(
+        results = hal._cascade_search(
             client, "/media/series/Test/Test.S01E01.mkv", "ita",
             file_hash="abc123", file_size=1000
         )
@@ -803,7 +803,7 @@ class TestCascadeSearchUnit(unittest.TestCase):
                 return []
         client = MockClient()
 
-        results = sub_fetcher._cascade_search(
+        results = hal._cascade_search(
             client, "/media/series/Test/Test.S01E01.mkv", "ita",
             file_hash="abc123", file_size=1000
         )
@@ -818,7 +818,7 @@ class TestGroupBySeries(unittest.TestCase):
             "/media/series/PLUR1BUS/Pluribus.S01E02.mkv",
             "/media/series/The Chosen/Season 1/The.Chosen.S01E01.mkv",
         ]
-        groups = sub_fetcher.group_by_series(paths)
+        groups = hal.group_by_series(paths)
         self.assertIn("PLUR1BUS", groups)
         self.assertIn("The Chosen", groups)
         self.assertEqual(len(groups["PLUR1BUS"]), 2)
@@ -830,33 +830,33 @@ class TestGroupBySeries(unittest.TestCase):
             "/media/series/Show/Show.S01E01.mkv",
             "/media/series/Show/Show.S01E02.mkv",
         ]
-        groups = sub_fetcher.group_by_series(paths)
+        groups = hal.group_by_series(paths)
         self.assertEqual(groups["Show"][0], paths[1])  # E01 first
         self.assertEqual(groups["Show"][2], paths[0])  # E03 last
 
     def test_single_file(self):
         paths = ["/media/films/Movie (2024)/Movie.2024.mkv"]
-        groups = sub_fetcher.group_by_series(paths)
+        groups = hal.group_by_series(paths)
         self.assertEqual(len(groups), 1)
 
 
 class TestProgressBar(unittest.TestCase):
     def test_zero(self):
-        bar = sub_fetcher._progress_bar(0, 10)
+        bar = hal._progress_bar(0, 10)
         self.assertIn("0%", bar)
 
     def test_half(self):
-        bar = sub_fetcher._progress_bar(5, 10)
+        bar = hal._progress_bar(5, 10)
         self.assertIn("50%", bar)
         self.assertIn("▓", bar)
         self.assertIn("░", bar)
 
     def test_full(self):
-        bar = sub_fetcher._progress_bar(10, 10)
+        bar = hal._progress_bar(10, 10)
         self.assertIn("100%", bar)
 
     def test_empty_total(self):
-        bar = sub_fetcher._progress_bar(0, 0)
+        bar = hal._progress_bar(0, 0)
         self.assertEqual(bar, "")
 
 
@@ -884,7 +884,7 @@ class TestHasItalianAudio(unittest.TestCase):
             {"tags": {"language": "ita", "title": "Italian"}}
         ])
         try:
-            self.assertTrue(sub_fetcher.has_italian_audio("/fake/video.mkv"))
+            self.assertTrue(hal.has_italian_audio("/fake/video.mkv"))
         finally:
             subprocess.run = orig
 
@@ -894,7 +894,7 @@ class TestHasItalianAudio(unittest.TestCase):
             {"tags": {"language": "eng", "title": "English"}}
         ])
         try:
-            self.assertFalse(sub_fetcher.has_italian_audio("/fake/video.mkv"))
+            self.assertFalse(hal.has_italian_audio("/fake/video.mkv"))
         finally:
             subprocess.run = orig
 
@@ -902,7 +902,7 @@ class TestHasItalianAudio(unittest.TestCase):
         import subprocess
         orig = self._mock_ffprobe([{"codec_type": "audio"}])
         try:
-            self.assertFalse(sub_fetcher.has_italian_audio("/fake/video.mkv"))
+            self.assertFalse(hal.has_italian_audio("/fake/video.mkv"))
         finally:
             subprocess.run = orig
 
@@ -914,7 +914,7 @@ class TestHasItalianAudio(unittest.TestCase):
             raise FileNotFoundError("ffprobe not found")
         subprocess.run = mock_run
         try:
-            self.assertFalse(sub_fetcher.has_italian_audio("/fake/video.mkv"))
+            self.assertFalse(hal.has_italian_audio("/fake/video.mkv"))
         finally:
             subprocess.run = original_run
 
@@ -924,16 +924,16 @@ class TestSubdlClient(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         # Save original and set a fake API key
-        self._orig_key = sub_fetcher.SUBDL_API_KEY
-        sub_fetcher.SUBDL_API_KEY = "test_key"
+        self._orig_key = hal.SUBDL_API_KEY
+        hal.SUBDL_API_KEY = "test_key"
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
-        sub_fetcher.SUBDL_API_KEY = self._orig_key
+        hal.SUBDL_API_KEY = self._orig_key
 
     def test_search_returns_empty_without_api_key(self):
-        sub_fetcher.SUBDL_API_KEY = ""
-        client = sub_fetcher.SubdlClient()
+        hal.SUBDL_API_KEY = ""
+        client = hal.SubdlClient()
         self.assertEqual(client.search("Test"), [])
 
     def test_download_extracts_srt_from_zip(self):
@@ -950,7 +950,7 @@ class TestSubdlClient(unittest.TestCase):
         urllib.request.urlopen = mock_urlopen
 
         try:
-            client = sub_fetcher.SubdlClient()
+            client = hal.SubdlClient()
             content = client.download({"url": "test/path", "release_name": "test"})
             self.assertIsNotNone(content)
             self.assertIn(b"Hello world", content)
@@ -969,14 +969,14 @@ class TestSubdlClient(unittest.TestCase):
         urllib.request.urlopen = mock_urlopen
 
         try:
-            client = sub_fetcher.SubdlClient()
+            client = hal.SubdlClient()
             content = client.download({"url": "test/path", "release_name": "test"})
             self.assertIsNone(content)
         finally:
             urllib.request.urlopen = original_urlopen
 
     def test_lang_map(self):
-        client = sub_fetcher.SubdlClient()
+        client = hal.SubdlClient()
         self.assertEqual(client.LANG_MAP.get("ita"), "it")
         self.assertEqual(client.LANG_MAP.get("eng"), "en")
 
@@ -989,7 +989,7 @@ class TestSubdlForcedFiltering(unittest.TestCase):
             {"release_name": "Movie.720p.x264-GRP.eng-forced", "url": "/sub/1.zip", "name": "forced"},
             {"release_name": "Movie.720p.x264-GRP.eng-SDH", "url": "/sub/2.zip", "name": "full"},
         ]
-        client = sub_fetcher.SubdlClient()
+        client = hal.SubdlClient()
         video_path = "/media/films/Movie (2024)/Movie.720p.x264-GRP.mkv"
         video_base = os.path.splitext(os.path.basename(video_path))[0].lower()
         release_group = "grp"
@@ -1045,7 +1045,7 @@ class TestSubdlZipPreferNonForced(unittest.TestCase):
         urllib.request.urlopen = mock_urlopen
 
         try:
-            client = sub_fetcher.SubdlClient()
+            client = hal.SubdlClient()
             content = client.download({"url": "test/path", "release_name": "test"})
             self.assertIsNotNone(content)
             self.assertIn(b"Full dialogue", content)
@@ -1065,7 +1065,7 @@ class TestSubdlZipPreferNonForced(unittest.TestCase):
         urllib.request.urlopen = mock_urlopen
 
         try:
-            client = sub_fetcher.SubdlClient()
+            client = hal.SubdlClient()
             content = client.download({"url": "test/path", "release_name": "test"})
             self.assertIsNotNone(content)
             self.assertIn(b"Forced only", content)
@@ -1079,7 +1079,7 @@ class TestSyncSkipLogic(unittest.TestCase):
     def test_translate_and_save_accepts_skip_sync(self):
         # Just verify the function signature accepts skip_sync
         import inspect
-        sig = inspect.signature(sub_fetcher._translate_and_save)
+        sig = inspect.signature(hal._translate_and_save)
         self.assertIn("skip_sync", sig.parameters)
         self.assertEqual(sig.parameters["skip_sync"].default, False)
 
@@ -1089,7 +1089,7 @@ class TestSyncSubtitleReturn(unittest.TestCase):
 
     def test_sync_signature_has_min_score(self):
         import inspect
-        sig = inspect.signature(sub_fetcher.sync_subtitle)
+        sig = inspect.signature(hal.sync_subtitle)
         self.assertIn("min_score", sig.parameters)
         self.assertEqual(sig.parameters["min_score"].default, 0)
 
@@ -1098,19 +1098,19 @@ class TestDownloadQueue(unittest.TestCase):
     """Test download queue infrastructure."""
 
     def test_queue_exists(self):
-        self.assertTrue(hasattr(sub_fetcher, "download_queue"))
+        self.assertTrue(hasattr(hal, "download_queue"))
 
     def test_queue_position_returns_int(self):
-        pos = sub_fetcher.queue_position()
+        pos = hal.queue_position()
         self.assertIsInstance(pos, int)
         self.assertEqual(pos, 0)
 
     def test_queue_put_and_get(self):
-        sub_fetcher.download_queue.put({"type": "single", "path": "/test/video.mkv"})
-        self.assertEqual(sub_fetcher.queue_position(), 1)
-        job = sub_fetcher.download_queue.get_nowait()
+        hal.download_queue.put({"type": "single", "path": "/test/video.mkv"})
+        self.assertEqual(hal.queue_position(), 1)
+        job = hal.download_queue.get_nowait()
         self.assertEqual(job["path"], "/test/video.mkv")
-        sub_fetcher.download_queue.task_done()
+        hal.download_queue.task_done()
 
 
 class TestEpisodeMatchingInScoring(unittest.TestCase):
@@ -1121,11 +1121,11 @@ class TestEpisodeMatchingInScoring(unittest.TestCase):
             {"release_name": "Pluribus S01E01 720p WEB", "url": "/sub/1.zip", "name": ""},
             {"release_name": "Pluribus S01E08 720p WEB", "url": "/sub/2.zip", "name": ""},
         ]
-        client = sub_fetcher.SubdlClient()
+        client = hal.SubdlClient()
         video_path = "/media/series/PLUR1BUS/Pluribus.S01E01.720p.x264-FENiX.mkv"
 
         scored = []
-        parsed = sub_fetcher.parse_video(video_path)
+        parsed = hal.parse_video(video_path)
         for sub_item in results:
             score = 0
             release = (sub_item.get("release_name", "") or "").lower()
@@ -1142,7 +1142,7 @@ class TestEpisodeMatchingInScoring(unittest.TestCase):
         self.assertGreater(scored[0][0], scored[1][0])
 
     def test_wrong_episode_gets_negative_score(self):
-        parsed = sub_fetcher.parse_video("/media/series/Show/Show.S01E01.mkv")
+        parsed = hal.parse_video("/media/series/Show/Show.S01E01.mkv")
         release = "show s01e08 720p web"
         ep_match = re.search(r"s(\d+)e(\d+)", release)
         self.assertIsNotNone(ep_match)
@@ -1156,16 +1156,16 @@ class TestTwoPhaseDownload(unittest.TestCase):
 
     def test_do_download_accepts_translate_param(self):
         import inspect
-        sig = inspect.signature(sub_fetcher.do_download)
+        sig = inspect.signature(hal.do_download)
         self.assertIn("translate", sig.parameters)
         self.assertEqual(sig.parameters["translate"].default, True)
 
     def test_do_batch_translate_exists(self):
-        self.assertTrue(hasattr(sub_fetcher, "do_batch_translate"))
-        self.assertTrue(callable(sub_fetcher.do_batch_translate))
+        self.assertTrue(hasattr(hal, "do_batch_translate"))
+        self.assertTrue(callable(hal.do_batch_translate))
 
     def test_estimate_batch_translation_cost_exists(self):
-        self.assertTrue(hasattr(sub_fetcher, "_estimate_batch_translation_cost"))
+        self.assertTrue(hasattr(hal, "_estimate_batch_translation_cost"))
 
 
 class TestFindVideosByNameWithDots(unittest.TestCase):
@@ -1173,34 +1173,34 @@ class TestFindVideosByNameWithDots(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_series = sub_fetcher.SERIES_PATH
-        self._orig_films = sub_fetcher.FILMS_PATH
-        sub_fetcher.SERIES_PATH = os.path.join(self.tmpdir, "series")
-        sub_fetcher.FILMS_PATH = os.path.join(self.tmpdir, "films")
-        os.makedirs(sub_fetcher.SERIES_PATH)
-        os.makedirs(sub_fetcher.FILMS_PATH)
+        self._orig_series = hal.SERIES_PATH
+        self._orig_films = hal.FILMS_PATH
+        hal.SERIES_PATH = os.path.join(self.tmpdir, "series")
+        hal.FILMS_PATH = os.path.join(self.tmpdir, "films")
+        os.makedirs(hal.SERIES_PATH)
+        os.makedirs(hal.FILMS_PATH)
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
-        sub_fetcher.SERIES_PATH = self._orig_series
-        sub_fetcher.FILMS_PATH = self._orig_films
+        hal.SERIES_PATH = self._orig_series
+        hal.FILMS_PATH = self._orig_films
 
     def test_finds_dotted_filename(self):
-        show_dir = os.path.join(sub_fetcher.SERIES_PATH, "PLUR1BUS")
+        show_dir = os.path.join(hal.SERIES_PATH, "PLUR1BUS")
         os.makedirs(show_dir)
         video = os.path.join(show_dir, "Pluribus.S01E01.720p.x264-FENiX.mkv")
         open(video, "w").close()
 
-        matches = sub_fetcher.find_videos_by_name("pluribus s01e01")
+        matches = hal.find_videos_by_name("pluribus s01e01")
         self.assertEqual(len(matches), 1)
 
     def test_finds_by_folder_name(self):
-        show_dir = os.path.join(sub_fetcher.SERIES_PATH, "PLUR1BUS")
+        show_dir = os.path.join(hal.SERIES_PATH, "PLUR1BUS")
         os.makedirs(show_dir)
         video = os.path.join(show_dir, "Pluribus.S01E01.720p.x264-FENiX.mkv")
         open(video, "w").close()
 
-        matches = sub_fetcher.find_videos_by_name("pluribus")
+        matches = hal.find_videos_by_name("pluribus")
         self.assertEqual(len(matches), 1)
 
 
@@ -1208,10 +1208,10 @@ class TestQueueTranslateJobType(unittest.TestCase):
     """Test that queue worker handles 'translate' job type."""
 
     def test_queue_accepts_translate_job(self):
-        sub_fetcher.download_queue.put({"type": "translate", "paths": ["/test/video.mkv"]})
-        job = sub_fetcher.download_queue.get_nowait()
+        hal.download_queue.put({"type": "translate", "paths": ["/test/video.mkv"]})
+        job = hal.download_queue.get_nowait()
         self.assertEqual(job["type"], "translate")
-        sub_fetcher.download_queue.task_done()
+        hal.download_queue.task_done()
 
 
 class TestQueueWorkerSingleJobNoDuplicateMessages(unittest.TestCase):
@@ -1232,18 +1232,18 @@ class TestQueueWorkerSingleJobNoDuplicateMessages(unittest.TestCase):
         # Drain any leftover items so the worker picks up our job first
         while True:
             try:
-                sub_fetcher.download_queue.get_nowait()
-                sub_fetcher.download_queue.task_done()
+                hal.download_queue.get_nowait()
+                hal.download_queue.task_done()
             except Empty:
                 break
 
-        sub_fetcher.download_queue.put(job)
+        hal.download_queue.put(job)
 
         # Run the worker body for exactly one job by inlining the per-job
         # logic via a patched queue.get that raises Empty after the first call.
         from threading import Thread
         stop = {"done": False}
-        original_get = sub_fetcher.download_queue.get
+        original_get = hal.download_queue.get
 
         def get_then_stop(*args, **kwargs):
             if stop["done"]:
@@ -1251,12 +1251,12 @@ class TestQueueWorkerSingleJobNoDuplicateMessages(unittest.TestCase):
             stop["done"] = True
             return original_get(*args, **kwargs)
 
-        with patch.object(sub_fetcher, "do_download", side_effect=fake_do_download), \
-             patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append(("send", a, k)) or {"ok": True, "result": {"message_id": 1}}), \
-             patch.object(sub_fetcher, "tg_edit_message", side_effect=lambda *a, **k: sent.append(("edit", a, k))), \
-             patch.object(sub_fetcher, "load_state", return_value={"asked": {}, "downloaded": {}}), \
-             patch.object(sub_fetcher.download_queue, "get", side_effect=get_then_stop):
-            t = Thread(target=sub_fetcher._queue_worker, args=({},), daemon=True)
+        with patch.object(hal, "do_download", side_effect=fake_do_download), \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(("send", a, k)) or {"ok": True, "result": {"message_id": 1}}), \
+             patch.object(hal, "tg_edit_message", side_effect=lambda *a, **k: sent.append(("edit", a, k))), \
+             patch.object(hal, "load_state", return_value={"asked": {}, "downloaded": {}}), \
+             patch.object(hal.download_queue, "get", side_effect=get_then_stop):
+            t = Thread(target=hal._queue_worker, args=({},), daemon=True)
             t.start()
             t.join(timeout=2.0)
         return sent, captured
@@ -1295,9 +1295,9 @@ class TestValidateSync(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         dest = os.path.join(tmp, "test.it.srt")
         try:
-            with patch.object(sub_fetcher, "sync_subtitle",
+            with patch.object(hal, "sync_subtitle",
                               return_value={"ok": True, "score": 900.0, "offset": "0.5", "fps_scale": "1.0"}):
-                result = sub_fetcher.validate_sync("/fake/video.mkv", content, dest)
+                result = hal.validate_sync("/fake/video.mkv", content, dest)
             self.assertTrue(result["ok"])
             self.assertEqual(result["score"], 900.0)
         finally:
@@ -1309,9 +1309,9 @@ class TestValidateSync(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         dest = os.path.join(tmp, "test.it.srt")
         try:
-            with patch.object(sub_fetcher, "sync_subtitle",
+            with patch.object(hal, "sync_subtitle",
                               return_value={"ok": False, "score": 200.0, "offset": "0", "fps_scale": "1.0"}):
-                result = sub_fetcher.validate_sync("/fake/video.mkv", content, dest)
+                result = hal.validate_sync("/fake/video.mkv", content, dest)
             self.assertFalse(result["ok"])
             self.assertFalse(os.path.exists(dest))
         finally:
@@ -1323,8 +1323,8 @@ class TestValidateSync(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         dest = os.path.join(tmp, "test.it.srt")
         try:
-            with patch.object(sub_fetcher, "sync_subtitle", return_value=False):
-                result = sub_fetcher.validate_sync("/fake/video.mkv", content, dest)
+            with patch.object(hal, "sync_subtitle", return_value=False):
+                result = hal.validate_sync("/fake/video.mkv", content, dest)
             self.assertFalse(result)
             self.assertFalse(os.path.exists(dest))
         finally:
@@ -1367,14 +1367,14 @@ class TestSyncValidationCascade(unittest.TestCase):
         state = {"asked": {}, "downloaded": {}}
         sent = []
 
-        with patch.object(sub_fetcher, "SubdlClient", return_value=subdl_mock), \
-             patch.object(sub_fetcher, "OSClient", return_value=os_client), \
-             patch.object(sub_fetcher, "validate_sync", side_effect=fake_validate), \
-             patch.object(sub_fetcher, "find_existing_srt", return_value=None), \
-             patch.object(sub_fetcher, "_save_sub_and_update_state"), \
-             patch.object(sub_fetcher, "save_state"), \
-             patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
-            result = sub_fetcher.do_download(video, state, silent=True, translate=False)
+        with patch.object(hal, "SubdlClient", return_value=subdl_mock), \
+             patch.object(hal, "OSClient", return_value=os_client), \
+             patch.object(hal, "validate_sync", side_effect=fake_validate), \
+             patch.object(hal, "find_existing_srt", return_value=None), \
+             patch.object(hal, "_save_sub_and_update_state"), \
+             patch.object(hal, "save_state"), \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
+            result = hal.do_download(video, state, silent=True, translate=False)
 
         shutil.rmtree(tmp)
         return result
@@ -1414,14 +1414,14 @@ class TestSyncValidationCascade(unittest.TestCase):
 
         state = {"asked": {}, "downloaded": {}}
         try:
-            with patch.object(sub_fetcher, "SubdlClient", return_value=subdl_mock), \
-                 patch.object(sub_fetcher, "OSClient", return_value=os_client), \
-                 patch.object(sub_fetcher, "validate_sync", side_effect=fake_validate), \
-                 patch.object(sub_fetcher, "find_existing_srt", return_value=None), \
-                 patch.object(sub_fetcher, "_save_sub_and_update_state"), \
-                 patch.object(sub_fetcher, "save_state"), \
-                 patch.object(sub_fetcher, "tg_send"):
-                result = sub_fetcher.do_download(video, state, silent=True, translate=False)
+            with patch.object(hal, "SubdlClient", return_value=subdl_mock), \
+                 patch.object(hal, "OSClient", return_value=os_client), \
+                 patch.object(hal, "validate_sync", side_effect=fake_validate), \
+                 patch.object(hal, "find_existing_srt", return_value=None), \
+                 patch.object(hal, "_save_sub_and_update_state"), \
+                 patch.object(hal, "save_state"), \
+                 patch.object(hal, "tg_send"):
+                result = hal.do_download(video, state, silent=True, translate=False)
             self.assertTrue(result)
             # Both .it.srt and .en.srt were written
             self.assertTrue(any(p.endswith(".it.srt") for p in saved_paths))
@@ -1463,7 +1463,7 @@ class TestSearchTrace(unittest.TestCase):
 
     def test_do_download_accepts_trace_param(self):
         import inspect
-        sig = inspect.signature(sub_fetcher.do_download)
+        sig = inspect.signature(hal.do_download)
         self.assertIn("trace", sig.parameters)
         self.assertIsNone(sig.parameters["trace"].default)
 
@@ -1477,15 +1477,15 @@ class TestSearchTrace(unittest.TestCase):
             {"provider": "OpenSubtitles", "lang": "ITA", "method": "hash",
              "query": "abc123", "results": 0},
         ]
-        out = sub_fetcher.format_search_trace(trace)
+        out = hal.format_search_trace(trace)
         self.assertIn("Subdl imdb ITA 'tt1234567': 0", out)
         self.assertIn("Subdl nome ITA 'Father Mother': 5", out)
         self.assertIn("forced/incompleti", out)
         self.assertIn("OpenSubtitles hash ITA 'abc123': 0", out)
 
     def test_format_search_trace_handles_empty(self):
-        self.assertEqual(sub_fetcher.format_search_trace([]), "")
-        self.assertEqual(sub_fetcher.format_search_trace(None), "")
+        self.assertEqual(hal.format_search_trace([]), "")
+        self.assertEqual(hal.format_search_trace(None), "")
 
     def test_format_search_trace_includes_quota(self):
         trace = [
@@ -1493,7 +1493,7 @@ class TestSearchTrace(unittest.TestCase):
              "query": "tt1234567", "results": 0},
             {"_quota": 3},
         ]
-        out = sub_fetcher.format_search_trace(trace)
+        out = hal.format_search_trace(trace)
         self.assertIn("download rimanenti: 3", out)
         self.assertIn("Subdl imdb ITA", out)
 
@@ -1505,7 +1505,7 @@ class TestSearchTrace(unittest.TestCase):
             def search_name(self, query, *a, **kw):
                 return [{"SubFileName": "x.srt"}] if query == "Test" else []
         trace = []
-        results = sub_fetcher._cascade_search(
+        results = hal._cascade_search(
             MockClient(), "/media/films/Test/Test.2024.mkv", "ita",
             file_hash="deadbeef", file_size=1000, trace=trace,
         )
@@ -1521,11 +1521,11 @@ class TestSearchTrace(unittest.TestCase):
 
     def test_subdl_search_and_download_populates_trace(self):
         from unittest.mock import patch
-        client = sub_fetcher.SubdlClient()
+        client = hal.SubdlClient()
         trace = []
         # find_imdb_id returns None so only the name cascade fires
-        with patch.object(sub_fetcher, "find_imdb_id", return_value=None), \
-             patch.object(sub_fetcher, "get_search_queries", return_value=["father mother"]), \
+        with patch.object(hal, "find_imdb_id", return_value=None), \
+             patch.object(hal, "get_search_queries", return_value=["father mother"]), \
              patch.object(client, "search", return_value=[]):
             result = client.search_and_download(
                 "/media/films/Father/Father.Mother.2025.mkv",
@@ -1549,49 +1549,49 @@ class TestLoadSaveBatches(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_batches = sub_fetcher.BATCHES_FILE
-        sub_fetcher.BATCHES_FILE = os.path.join(self.tmpdir, "batches.json")
+        self._orig_batches = hal.BATCHES_FILE
+        hal.BATCHES_FILE = os.path.join(self.tmpdir, "batches.json")
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
-        sub_fetcher.BATCHES_FILE = self._orig_batches
+        hal.BATCHES_FILE = self._orig_batches
 
     def test_returns_empty_dict_when_file_missing(self):
-        batches = sub_fetcher.load_batches()
+        batches = hal.load_batches()
         self.assertEqual(batches, {})
 
     def test_roundtrip_save_and_load(self):
         data = {"abc12345": {"paths": ["/media/films/Movie.mkv"], "type": "translate"}}
-        sub_fetcher.save_batches(data)
-        loaded = sub_fetcher.load_batches()
+        hal.save_batches(data)
+        loaded = hal.load_batches()
         self.assertEqual(loaded, data)
 
     def test_save_multiple_batches(self):
-        sub_fetcher.save_batches({"hash1": {"paths": ["/a.mkv"]}})
-        sub_fetcher.save_batches({"hash2": {"paths": ["/b.mkv"]}})
+        hal.save_batches({"hash1": {"paths": ["/a.mkv"]}})
+        hal.save_batches({"hash2": {"paths": ["/b.mkv"]}})
         # Second save overwrites first — caller is responsible for merging
-        loaded = sub_fetcher.load_batches()
+        loaded = hal.load_batches()
         self.assertIn("hash2", loaded)
 
     def test_save_does_not_touch_state_json(self):
         state_file = os.path.join(self.tmpdir, "state.json")
-        sub_fetcher.save_batches({"h": {"paths": []}})
+        hal.save_batches({"h": {"paths": []}})
         self.assertFalse(os.path.exists(state_file))
 
     def test_batches_independent_from_state(self):
         """Saving state must NOT wipe batches.json."""
-        sub_fetcher.save_batches({"abc": {"paths": ["/x.mkv"], "type": "translate"}})
+        hal.save_batches({"abc": {"paths": ["/x.mkv"], "type": "translate"}})
 
-        orig_state = sub_fetcher.STATE_FILE
-        sub_fetcher.STATE_FILE = os.path.join(self.tmpdir, "state.json")
+        orig_state = hal.STATE_FILE
+        hal.STATE_FILE = os.path.join(self.tmpdir, "state.json")
         try:
             state = {"asked": {}, "downloaded": {}, "last_offset": 0}
-            sub_fetcher.save_state(state)
+            hal.save_state(state)
             # Batches must still be there after save_state
-            loaded = sub_fetcher.load_batches()
+            loaded = hal.load_batches()
             self.assertIn("abc", loaded)
         finally:
-            sub_fetcher.STATE_FILE = orig_state
+            hal.STATE_FILE = orig_state
 
 
 class TestDoCleanup(unittest.TestCase):
@@ -1609,28 +1609,28 @@ class TestDoCleanup(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_films = sub_fetcher.FILMS_PATH
-        self._orig_series = sub_fetcher.SERIES_PATH
-        sub_fetcher.FILMS_PATH = os.path.join(self.tmpdir, "films")
-        sub_fetcher.SERIES_PATH = os.path.join(self.tmpdir, "series")
-        os.makedirs(sub_fetcher.FILMS_PATH)
-        os.makedirs(sub_fetcher.SERIES_PATH)
+        self._orig_films = hal.FILMS_PATH
+        self._orig_series = hal.SERIES_PATH
+        hal.FILMS_PATH = os.path.join(self.tmpdir, "films")
+        hal.SERIES_PATH = os.path.join(self.tmpdir, "series")
+        os.makedirs(hal.FILMS_PATH)
+        os.makedirs(hal.SERIES_PATH)
 
         self._tg_calls = []
-        self._orig_tg_send = sub_fetcher.tg_send
-        self._orig_tg_edit = sub_fetcher.tg_edit_message
-        sub_fetcher.tg_send = lambda *a, **kw: self._tg_calls.append(("send", a))
-        sub_fetcher.tg_edit_message = lambda *a, **kw: self._tg_calls.append(("edit", a))
+        self._orig_tg_send = hal.tg_send
+        self._orig_tg_edit = hal.tg_edit_message
+        hal.tg_send = lambda *a, **kw: self._tg_calls.append(("send", a))
+        hal.tg_edit_message = lambda *a, **kw: self._tg_calls.append(("edit", a))
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
-        sub_fetcher.FILMS_PATH = self._orig_films
-        sub_fetcher.SERIES_PATH = self._orig_series
-        sub_fetcher.tg_send = self._orig_tg_send
-        sub_fetcher.tg_edit_message = self._orig_tg_edit
+        hal.FILMS_PATH = self._orig_films
+        hal.SERIES_PATH = self._orig_series
+        hal.tg_send = self._orig_tg_send
+        hal.tg_edit_message = self._orig_tg_edit
 
     def _create_video_and_sub(self, folder, basename, sub_content):
-        d = os.path.join(sub_fetcher.FILMS_PATH, folder)
+        d = os.path.join(hal.FILMS_PATH, folder)
         os.makedirs(d, exist_ok=True)
         video = os.path.join(d, basename + ".mkv")
         srt = os.path.join(d, basename + ".it.srt")
@@ -1642,26 +1642,26 @@ class TestDoCleanup(unittest.TestCase):
     def test_removes_placeholder_sub(self):
         video, srt = self._create_video_and_sub("Movie (2024)", "Movie.2024", self._PLACEHOLDER)
         state = {"asked": {}, "downloaded": {video: {"sub": srt}}}
-        sub_fetcher.do_cleanup(state)
+        hal.do_cleanup(state)
         self.assertFalse(os.path.exists(srt))
 
     def test_leaves_real_sub_intact(self):
         video, srt = self._create_video_and_sub("Movie (2024)", "Movie.2024", self._REAL_SUB)
         state = {"asked": {}, "downloaded": {}}
-        sub_fetcher.do_cleanup(state)
+        hal.do_cleanup(state)
         self.assertTrue(os.path.exists(srt))
 
     def test_removes_video_from_downloaded_state(self):
         video, srt = self._create_video_and_sub("Movie (2024)", "Movie.2024", self._PLACEHOLDER)
         state = {"asked": {video: {"status": "yes"}}, "downloaded": {video: {"sub": srt}}}
-        sub_fetcher.do_cleanup(state)
+        hal.do_cleanup(state)
         self.assertNotIn(video, state["downloaded"])
         self.assertNotIn(video, state["asked"])
 
     def test_uses_progress_msg_id_when_provided(self):
         self._create_video_and_sub("Movie (2024)", "Movie.2024", self._PLACEHOLDER)
         state = {"asked": {}, "downloaded": {}}
-        sub_fetcher.do_cleanup(state, progress_msg_id=42)
+        hal.do_cleanup(state, progress_msg_id=42)
         edits = [c for c in self._tg_calls if c[0] == "edit"]
         self.assertTrue(len(edits) > 0)
         self.assertEqual(edits[-1][1][0], 42)
@@ -1669,7 +1669,7 @@ class TestDoCleanup(unittest.TestCase):
     def test_sends_message_when_no_msg_id(self):
         self._create_video_and_sub("Movie (2024)", "Movie.2024", self._PLACEHOLDER)
         state = {"asked": {}, "downloaded": {}}
-        sub_fetcher.do_cleanup(state, progress_msg_id=None)
+        hal.do_cleanup(state, progress_msg_id=None)
         sends = [c for c in self._tg_calls if c[0] == "send"]
         self.assertTrue(len(sends) > 0)
 
@@ -1679,31 +1679,31 @@ class TestDoSync(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_series = sub_fetcher.SERIES_PATH
-        self._orig_films = sub_fetcher.FILMS_PATH
-        sub_fetcher.SERIES_PATH = os.path.join(self.tmpdir, "series")
-        sub_fetcher.FILMS_PATH = os.path.join(self.tmpdir, "films")
-        os.makedirs(sub_fetcher.SERIES_PATH)
-        os.makedirs(sub_fetcher.FILMS_PATH)
+        self._orig_series = hal.SERIES_PATH
+        self._orig_films = hal.FILMS_PATH
+        hal.SERIES_PATH = os.path.join(self.tmpdir, "series")
+        hal.FILMS_PATH = os.path.join(self.tmpdir, "films")
+        os.makedirs(hal.SERIES_PATH)
+        os.makedirs(hal.FILMS_PATH)
 
         self._tg_calls = []
-        self._orig_tg_send = sub_fetcher.tg_send
-        self._orig_tg_edit = sub_fetcher.tg_edit_message
-        self._orig_sync = sub_fetcher.sync_subtitle
-        sub_fetcher.tg_send = lambda *a, **kw: self._tg_calls.append(("send", a)) or {"ok": True, "result": {"message_id": 99}}
-        sub_fetcher.tg_edit_message = lambda *a, **kw: self._tg_calls.append(("edit", a))
-        sub_fetcher.sync_subtitle = lambda v, s, **kw: {"ok": True, "score": 100, "offset": 0.0}
+        self._orig_tg_send = hal.tg_send
+        self._orig_tg_edit = hal.tg_edit_message
+        self._orig_sync = hal.sync_subtitle
+        hal.tg_send = lambda *a, **kw: self._tg_calls.append(("send", a)) or {"ok": True, "result": {"message_id": 99}}
+        hal.tg_edit_message = lambda *a, **kw: self._tg_calls.append(("edit", a))
+        hal.sync_subtitle = lambda v, s, **kw: {"ok": True, "score": 100, "offset": 0.0}
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
-        sub_fetcher.SERIES_PATH = self._orig_series
-        sub_fetcher.FILMS_PATH = self._orig_films
-        sub_fetcher.tg_send = self._orig_tg_send
-        sub_fetcher.tg_edit_message = self._orig_tg_edit
-        sub_fetcher.sync_subtitle = self._orig_sync
+        hal.SERIES_PATH = self._orig_series
+        hal.FILMS_PATH = self._orig_films
+        hal.tg_send = self._orig_tg_send
+        hal.tg_edit_message = self._orig_tg_edit
+        hal.sync_subtitle = self._orig_sync
 
     def _create_pair(self, folder, basename):
-        d = os.path.join(sub_fetcher.SERIES_PATH, folder)
+        d = os.path.join(hal.SERIES_PATH, folder)
         os.makedirs(d, exist_ok=True)
         video = os.path.join(d, basename + ".mkv")
         srt = os.path.join(d, basename + ".it.srt")
@@ -1713,18 +1713,18 @@ class TestDoSync(unittest.TestCase):
 
     def test_accepts_progress_msg_id_param(self):
         import inspect
-        sig = inspect.signature(sub_fetcher.do_sync)
+        sig = inspect.signature(hal.do_sync)
         self.assertIn("progress_msg_id", sig.parameters)
 
     def test_sends_not_found_when_no_matching_srt(self):
         state = {}
-        sub_fetcher.do_sync("NonExistent", state)
+        hal.do_sync("NonExistent", state)
         texts = " ".join(str(c) for c in self._tg_calls)
         self.assertIn("nonexistent", texts.lower())
 
     def test_uses_progress_msg_id_on_not_found(self):
         state = {}
-        sub_fetcher.do_sync("NonExistent", state, progress_msg_id=55)
+        hal.do_sync("NonExistent", state, progress_msg_id=55)
         edits = [c for c in self._tg_calls if c[0] == "edit"]
         self.assertTrue(len(edits) > 0)
         self.assertEqual(edits[0][1][0], 55)
@@ -1732,7 +1732,7 @@ class TestDoSync(unittest.TestCase):
     def test_syncs_matching_pair_and_reports_result(self):
         self._create_pair("Pluribus", "Pluribus.S01E01")
         state = {}
-        sub_fetcher.do_sync("Pluribus", state, progress_msg_id=10)
+        hal.do_sync("Pluribus", state, progress_msg_id=10)
         edits = [c for c in self._tg_calls if c[0] == "edit"]
         # Last edit should be the summary
         last_text = edits[-1][1][1]
@@ -1743,8 +1743,8 @@ class TestDoSync(unittest.TestCase):
         self._create_pair("ShowA", "ShowA.S01E01")
         self._create_pair("ShowB", "ShowB.S01E01")
         synced_calls = []
-        sub_fetcher.sync_subtitle = lambda v, s, **kw: synced_calls.append(v) or {"ok": True, "score": 100, "offset": 0.0}
-        sub_fetcher.do_sync("all", {})
+        hal.sync_subtitle = lambda v, s, **kw: synced_calls.append(v) or {"ok": True, "score": 100, "offset": 0.0}
+        hal.do_sync("all", {})
         self.assertEqual(len(synced_calls), 2)
 
 
@@ -1752,25 +1752,25 @@ class TestQueueSyncCleanupJobTypes(unittest.TestCase):
     """Test that queue accepts and correctly structures sync/cleanup jobs."""
 
     def test_queue_accepts_sync_job(self):
-        sub_fetcher.download_queue.put({"type": "sync", "query": "Pluribus", "msg_id": 42})
-        job = sub_fetcher.download_queue.get_nowait()
+        hal.download_queue.put({"type": "sync", "query": "Pluribus", "msg_id": 42})
+        job = hal.download_queue.get_nowait()
         self.assertEqual(job["type"], "sync")
         self.assertEqual(job["query"], "Pluribus")
         self.assertEqual(job["msg_id"], 42)
-        sub_fetcher.download_queue.task_done()
+        hal.download_queue.task_done()
 
     def test_queue_accepts_cleanup_job(self):
-        sub_fetcher.download_queue.put({"type": "cleanup", "msg_id": 7})
-        job = sub_fetcher.download_queue.get_nowait()
+        hal.download_queue.put({"type": "cleanup", "msg_id": 7})
+        job = hal.download_queue.get_nowait()
         self.assertEqual(job["type"], "cleanup")
         self.assertEqual(job["msg_id"], 7)
-        sub_fetcher.download_queue.task_done()
+        hal.download_queue.task_done()
 
     def test_do_cleanup_is_callable(self):
-        self.assertTrue(callable(sub_fetcher.do_cleanup))
+        self.assertTrue(callable(hal.do_cleanup))
 
     def test_do_sync_is_callable(self):
-        self.assertTrue(callable(sub_fetcher.do_sync))
+        self.assertTrue(callable(hal.do_sync))
 
 
 class TestBatchTranslatePersistence(unittest.TestCase):
@@ -1778,46 +1778,46 @@ class TestBatchTranslatePersistence(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_state = sub_fetcher.STATE_FILE
-        self._orig_batches = sub_fetcher.BATCHES_FILE
-        sub_fetcher.STATE_FILE = os.path.join(self.tmpdir, "state.json")
-        sub_fetcher.BATCHES_FILE = os.path.join(self.tmpdir, "batches.json")
+        self._orig_state = hal.STATE_FILE
+        self._orig_batches = hal.BATCHES_FILE
+        hal.STATE_FILE = os.path.join(self.tmpdir, "state.json")
+        hal.BATCHES_FILE = os.path.join(self.tmpdir, "batches.json")
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
-        sub_fetcher.STATE_FILE = self._orig_state
-        sub_fetcher.BATCHES_FILE = self._orig_batches
+        hal.STATE_FILE = self._orig_state
+        hal.BATCHES_FILE = self._orig_batches
 
     def test_batch_survives_save_state(self):
         """Simulates the race condition that was the root cause of 'Batch non trovato'."""
         # Queue worker saves a batch
-        sub_fetcher.save_batches({"deadbeef": {"paths": ["/media/films/Movie.mkv"], "type": "translate"}})
+        hal.save_batches({"deadbeef": {"paths": ["/media/films/Movie.mkv"], "type": "translate"}})
 
         # Main loop saves state (without batches) — should NOT wipe batches.json
         state = {"asked": {}, "downloaded": {}, "last_offset": 42}
-        sub_fetcher.save_state(state)
+        hal.save_state(state)
 
         # Batch must still be there
-        batches = sub_fetcher.load_batches()
+        batches = hal.load_batches()
         self.assertIn("deadbeef", batches)
         self.assertEqual(batches["deadbeef"]["paths"], ["/media/films/Movie.mkv"])
 
     def test_batch_found_after_multiple_state_saves(self):
-        sub_fetcher.save_batches({"tr123": {"paths": ["/a.mkv", "/b.mkv"], "type": "translate"}})
+        hal.save_batches({"tr123": {"paths": ["/a.mkv", "/b.mkv"], "type": "translate"}})
 
         for i in range(5):
-            sub_fetcher.save_state({"asked": {f"path_{i}": {"status": "no"}}, "downloaded": {}, "last_offset": i})
+            hal.save_state({"asked": {f"path_{i}": {"status": "no"}}, "downloaded": {}, "last_offset": i})
 
-        batches = sub_fetcher.load_batches()
+        batches = hal.load_batches()
         self.assertIn("tr123", batches)
 
     def test_explicit_batch_removal_works(self):
-        sub_fetcher.save_batches({"abc": {"paths": ["/x.mkv"]}, "def": {"paths": ["/y.mkv"]}})
-        batches = sub_fetcher.load_batches()
+        hal.save_batches({"abc": {"paths": ["/x.mkv"]}, "def": {"paths": ["/y.mkv"]}})
+        batches = hal.load_batches()
         batches.pop("abc", None)
-        sub_fetcher.save_batches(batches)
+        hal.save_batches(batches)
 
-        loaded = sub_fetcher.load_batches()
+        loaded = hal.load_batches()
         self.assertNotIn("abc", loaded)
         self.assertIn("def", loaded)
 
@@ -1847,12 +1847,12 @@ class TestClaudeBisectFallback(unittest.TestCase):
             return {"translations": {i: t for i, t in zip([x[0] for x in itxts], ["Ciao", "Mondo", "Addio"])},
                     "input_tokens": 100, "output_tokens": 50, "truncated": False, "ok": True}
 
-        orig = sub_fetcher._claude_translate_call
-        sub_fetcher._claude_translate_call = fake_call
+        orig = hal._claude_translate_call
+        hal._claude_translate_call = fake_call
         try:
-            result = sub_fetcher._claude_translate_bisect(indexed, "Test")
+            result = hal._claude_translate_bisect(indexed, "Test")
         finally:
-            sub_fetcher._claude_translate_call = orig
+            hal._claude_translate_call = orig
 
         self.assertEqual(result["translations"], {0: "Ciao", 1: "Mondo", 2: "Addio"})
         self.assertEqual(len(calls), 1)  # No retry needed
@@ -1874,13 +1874,13 @@ class TestClaudeBisectFallback(unittest.TestCase):
                 return {"translations": {i: f"v{i}" for i in asked},
                         "input_tokens": 30, "output_tokens": 30, "truncated": False, "ok": True}
 
-        orig = sub_fetcher._claude_translate_call
-        sub_fetcher._claude_translate_call = fake_call
+        orig = hal._claude_translate_call
+        hal._claude_translate_call = fake_call
         try:
-            result = sub_fetcher._claude_translate_bisect(
+            result = hal._claude_translate_bisect(
                 [(0, "a"), (1, "b"), (2, "c"), (3, "d")], "Test")
         finally:
-            sub_fetcher._claude_translate_call = orig
+            hal._claude_translate_call = orig
 
         # All 4 cues must be present in the final translation.
         self.assertEqual(set(result["translations"].keys()), {0, 1, 2, 3})
@@ -1896,12 +1896,12 @@ class TestClaudeBisectFallback(unittest.TestCase):
             return {"translations": {}, "input_tokens": 10, "output_tokens": 0,
                     "truncated": False, "ok": True}
 
-        orig = sub_fetcher._claude_translate_call
-        sub_fetcher._claude_translate_call = fake_call
+        orig = hal._claude_translate_call
+        hal._claude_translate_call = fake_call
         try:
-            result = sub_fetcher._claude_translate_bisect([(0, "stubborn cue")], "Test")
+            result = hal._claude_translate_bisect([(0, "stubborn cue")], "Test")
         finally:
-            sub_fetcher._claude_translate_call = orig
+            hal._claude_translate_call = orig
 
         self.assertEqual(result["translations"], {})
 
@@ -1927,13 +1927,13 @@ class TestClaudeBisectFallback(unittest.TestCase):
 
         urllib.request.urlopen = fake_urlopen
         # _claude_translate_call requires CLAUDE_API_KEY to be truthy to send.
-        prev_key = sub_fetcher.CLAUDE_API_KEY
-        sub_fetcher.CLAUDE_API_KEY = "test"
+        prev_key = hal.CLAUDE_API_KEY
+        hal.CLAUDE_API_KEY = "test"
         try:
-            result = sub_fetcher._claude_translate_call([(0, "a"), (1, "b")], "Test")
+            result = hal._claude_translate_call([(0, "a"), (1, "b")], "Test")
         finally:
             urllib.request.urlopen = original_urlopen
-            sub_fetcher.CLAUDE_API_KEY = prev_key
+            hal.CLAUDE_API_KEY = prev_key
 
         # Only asked-for indices survive.
         self.assertEqual(set(result["translations"].keys()), {0, 1})
@@ -1946,28 +1946,28 @@ class TestRadarrReleaseParsing(unittest.TestCase):
 
     def test_detects_ita_from_structured_languages(self):
         rel = {"title": "Movie.2024.1080p.x265", "languages": [{"id": 5, "name": "Italian"}]}
-        self.assertIn("ITA", sub_fetcher.detect_release_languages(rel))
+        self.assertIn("ITA", hal.detect_release_languages(rel))
 
     def test_detects_eng_from_structured_languages(self):
         rel = {"title": "Movie.2024.1080p.x265", "languages": [{"id": 1, "name": "English"}]}
-        self.assertIn("ENG", sub_fetcher.detect_release_languages(rel))
+        self.assertIn("ENG", hal.detect_release_languages(rel))
 
     def test_detects_ita_from_title_substring(self):
         rel = {"title": "Movie.2024.iTALiAN.1080p.WEBRip.x265.mkv", "languages": []}
-        self.assertIn("ITA", sub_fetcher.detect_release_languages(rel))
+        self.assertIn("ITA", hal.detect_release_languages(rel))
 
     def test_detects_multi_release(self):
         rel = {"title": "Movie.2024.MULTi.2160p.UHD.BluRay.x265.mkv", "languages": []}
-        self.assertIn("MULTI", sub_fetcher.detect_release_languages(rel))
+        self.assertIn("MULTI", hal.detect_release_languages(rel))
 
     def test_no_false_positive_eng_inside_word(self):
         # "ENGAGE" must not match "ENG" because of the word boundary.
         rel = {"title": "Engage.With.The.Aliens.2024.1080p.mkv", "languages": []}
-        self.assertNotIn("ENG", sub_fetcher.detect_release_languages(rel))
+        self.assertNotIn("ENG", hal.detect_release_languages(rel))
 
     def test_unknown_language_fallback(self):
         rel = {"title": "Random.Movie.2024.x265", "languages": []}
-        self.assertEqual(sub_fetcher.detect_release_languages(rel), ["?"])
+        self.assertEqual(hal.detect_release_languages(rel), ["?"])
 
     def test_rank_prefers_preferred_language_then_quality(self):
         ita_720 = {"title": "ITA.720p", "languages": [{"name": "Italian"}], "size": 1, "seeders": 10,
@@ -1976,7 +1976,7 @@ class TestRadarrReleaseParsing(unittest.TestCase):
                     "quality": {"quality": {"name": "Bluray-2160p"}}}
         ita_1080 = {"title": "ITA.1080p", "languages": [{"name": "Italian"}], "size": 1, "seeders": 5,
                     "quality": {"quality": {"name": "Bluray-1080p"}}}
-        ranked = sub_fetcher.rank_releases([eng_2160, ita_720, ita_1080], preferred=["ITA", "ENG"])
+        ranked = hal.rank_releases([eng_2160, ita_720, ita_1080], preferred=["ITA", "ENG"])
         # ITA must come before ENG even at higher quality; among ITA, 1080p > 720p.
         self.assertEqual(ranked[0]["title"], "ITA.1080p")
         self.assertEqual(ranked[1]["title"], "ITA.720p")
@@ -1987,7 +1987,7 @@ class TestRadarrReleaseParsing(unittest.TestCase):
              "quality": {"quality": {"name": "Bluray-1080p"}}}
         b = {"title": "B", "languages": [{"name": "Italian"}], "size": 1, "seeders": 200,
              "quality": {"quality": {"name": "Bluray-1080p"}}}
-        ranked = sub_fetcher.rank_releases([a, b], preferred=["ITA"])
+        ranked = hal.rank_releases([a, b], preferred=["ITA"])
         self.assertEqual(ranked[0]["title"], "B")
 
     def test_format_release_button_keeps_under_telegram_limit(self):
@@ -1995,7 +1995,7 @@ class TestRadarrReleaseParsing(unittest.TestCase):
                "languages": [{"name": "Italian"}],
                "quality": {"quality": {"name": "Bluray-2160p"}},
                "size": 18_400_000_000, "seeders": 142, "leechers": 3, "rejections": []}
-        label = sub_fetcher.format_release_button(rel)
+        label = hal.format_release_button(rel)
         self.assertLessEqual(len(label), 80)
         self.assertIn("🇮🇹", label)
         self.assertIn("2160p", label)
@@ -2005,7 +2005,7 @@ class TestRadarrReleaseParsing(unittest.TestCase):
         rel = {"title": "Foo", "languages": [{"name": "English"}],
                "quality": {"quality": {"name": "Bluray-1080p"}},
                "size": 1_000_000_000, "seeders": 10, "rejections": ["Already imported"]}
-        label = sub_fetcher.format_release_button(rel)
+        label = hal.format_release_button(rel)
         self.assertTrue(label.startswith("🚫"))
 
 
@@ -2014,22 +2014,22 @@ class TestRadarrRequestsState(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig = sub_fetcher.REQUESTS_FILE
-        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+        self._orig = hal.REQUESTS_FILE
+        hal.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
-        sub_fetcher.REQUESTS_FILE = self._orig
+        hal.REQUESTS_FILE = self._orig
 
     def test_save_load_round_trip(self):
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         rs["pending_radarr"]["download:123"] = {"title": "Foo", "year": 2024}
-        sub_fetcher.save_requests(rs)
-        loaded = sub_fetcher.load_requests()
+        hal.save_requests(rs)
+        loaded = hal.load_requests()
         self.assertEqual(loaded["pending_radarr"]["download:123"]["title"], "Foo")
 
     def test_missing_file_returns_empty_pending(self):
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         self.assertEqual(rs, {"pending_radarr": {}, "pending_cerca": {}})
 
 
@@ -2039,7 +2039,7 @@ class TestCommandDispatcher(unittest.TestCase):
 
     def test_canonical_lookup(self):
         for canonical in ["/stato", "/traduci", "/ritraduci", "/coda", "/log", "/falliti", "/scarica", "/aiuto"]:
-            spec = sub_fetcher._find_command(canonical)
+            spec = hal._find_command(canonical)
             self.assertIsNotNone(spec, f"canonical {canonical} should resolve")
             self.assertEqual(spec["canonical"], canonical)
 
@@ -2058,27 +2058,27 @@ class TestCommandDispatcher(unittest.TestCase):
             "/?": "/aiuto",
         }
         for alias, expected_canonical in aliases.items():
-            spec = sub_fetcher._find_command(alias)
+            spec = hal._find_command(alias)
             self.assertIsNotNone(spec, f"alias {alias} should resolve")
             self.assertEqual(spec["canonical"], expected_canonical)
 
     def test_unknown_returns_none(self):
-        self.assertIsNone(sub_fetcher._find_command("/notacommand"))
+        self.assertIsNone(hal._find_command("/notacommand"))
 
     def test_suggest_close_typo(self):
         # "/staus" is closest to the alias "/status" (insert 't'); both /status
         # and /stato map to the same handler, so any close hit is good UX.
-        suggestion = sub_fetcher._suggest_command("/staus")
+        suggestion = hal._suggest_command("/staus")
         self.assertIn(suggestion, ["/status", "/stato"])
         # "/coa" is closest to "/coda"
-        self.assertEqual(sub_fetcher._suggest_command("/coa"), "/coda")
+        self.assertEqual(hal._suggest_command("/coa"), "/coda")
 
     def test_suggest_too_far(self):
-        self.assertIsNone(sub_fetcher._suggest_command("/zzzzzzzzz"))
+        self.assertIsNone(hal._suggest_command("/zzzzzzzzz"))
 
     def test_no_duplicate_aliases(self):
         seen = {}
-        for c in sub_fetcher.COMMANDS:
+        for c in hal.COMMANDS:
             for form in [c["canonical"]] + c["aliases"]:
                 self.assertNotIn(form, seen,
                     f"alias {form} appears in both {seen.get(form)} and {c['canonical']}")
@@ -2136,8 +2136,8 @@ class TestHtmlEntitiesUnescapedInTranslation(unittest.TestCase):
 
     def test_deepl_output_is_html_unescaped(self):
         from unittest.mock import patch, MagicMock
-        original_key = sub_fetcher.DEEPL_API_KEY
-        sub_fetcher.DEEPL_API_KEY = "fake-key"
+        original_key = hal.DEEPL_API_KEY
+        hal.DEEPL_API_KEY = "fake-key"
 
         srt = "1\n00:00:01,000 --> 00:00:02,000\nIt's fine.\n"
 
@@ -2152,19 +2152,19 @@ class TestHtmlEntitiesUnescapedInTranslation(unittest.TestCase):
 
         try:
             with patch("urllib.request.urlopen", return_value=resp):
-                result = sub_fetcher.translate_srt_with_deepl(srt)
+                result = hal.translate_srt_with_deepl(srt)
             self.assertIsNotNone(result)
             blocks, _ = result
             self.assertEqual(blocks[0][2], 'L\'"ora" va bene.')
             self.assertNotIn("&#x27;", blocks[0][2])
             self.assertNotIn("&quot;", blocks[0][2])
         finally:
-            sub_fetcher.DEEPL_API_KEY = original_key
+            hal.DEEPL_API_KEY = original_key
 
     def test_polish_rewrite_is_html_unescaped(self):
         from unittest.mock import patch, MagicMock
-        original_key = sub_fetcher.CLAUDE_API_KEY
-        sub_fetcher.CLAUDE_API_KEY = "fake-key"
+        original_key = hal.CLAUDE_API_KEY
+        hal.CLAUDE_API_KEY = "fake-key"
 
         en_blocks = [("1", "00:00:01,000 --> 00:00:02,000", "It's fine.")]
         it_blocks = [("1", "00:00:01,000 --> 00:00:02,000", "Va bene.")]
@@ -2180,11 +2180,11 @@ class TestHtmlEntitiesUnescapedInTranslation(unittest.TestCase):
 
         try:
             with patch("urllib.request.urlopen", return_value=resp):
-                polished, n = sub_fetcher.polish_translation_with_claude(en_blocks, it_blocks, "Test")
+                polished, n = hal.polish_translation_with_claude(en_blocks, it_blocks, "Test")
             self.assertEqual(n, 1)
             self.assertEqual(polished[0][2], "L'ora & il momento")
         finally:
-            sub_fetcher.CLAUDE_API_KEY = original_key
+            hal.CLAUDE_API_KEY = original_key
 
 
 class TestLanguageNormalization(unittest.TestCase):
@@ -2192,76 +2192,76 @@ class TestLanguageNormalization(unittest.TestCase):
     the same canonical 3-letter ISO code from LANGUAGE_REGISTRY."""
 
     def test_two_letter_lowercase(self):
-        self.assertEqual(sub_fetcher.normalize_lang_input("it"), "ITA")
-        self.assertEqual(sub_fetcher.normalize_lang_input("en"), "ENG")
-        self.assertEqual(sub_fetcher.normalize_lang_input("ja"), "JPN")
+        self.assertEqual(hal.normalize_lang_input("it"), "ITA")
+        self.assertEqual(hal.normalize_lang_input("en"), "ENG")
+        self.assertEqual(hal.normalize_lang_input("ja"), "JPN")
 
     def test_two_letter_uppercase(self):
-        self.assertEqual(sub_fetcher.normalize_lang_input("IT"), "ITA")
-        self.assertEqual(sub_fetcher.normalize_lang_input("EN"), "ENG")
-        self.assertEqual(sub_fetcher.normalize_lang_input("DE"), "GER")
+        self.assertEqual(hal.normalize_lang_input("IT"), "ITA")
+        self.assertEqual(hal.normalize_lang_input("EN"), "ENG")
+        self.assertEqual(hal.normalize_lang_input("DE"), "GER")
 
     def test_three_letter(self):
-        self.assertEqual(sub_fetcher.normalize_lang_input("ita"), "ITA")
-        self.assertEqual(sub_fetcher.normalize_lang_input("JPN"), "JPN")
-        self.assertEqual(sub_fetcher.normalize_lang_input("kor"), "KOR")
+        self.assertEqual(hal.normalize_lang_input("ita"), "ITA")
+        self.assertEqual(hal.normalize_lang_input("JPN"), "JPN")
+        self.assertEqual(hal.normalize_lang_input("kor"), "KOR")
 
     def test_full_name(self):
-        self.assertEqual(sub_fetcher.normalize_lang_input("italian"), "ITA")
-        self.assertEqual(sub_fetcher.normalize_lang_input("Japanese"), "JPN")
-        self.assertEqual(sub_fetcher.normalize_lang_input("MANDARIN"), "CHI")
+        self.assertEqual(hal.normalize_lang_input("italian"), "ITA")
+        self.assertEqual(hal.normalize_lang_input("Japanese"), "JPN")
+        self.assertEqual(hal.normalize_lang_input("MANDARIN"), "CHI")
 
     def test_unknown_returns_none(self):
-        self.assertIsNone(sub_fetcher.normalize_lang_input("klingon"))
-        self.assertIsNone(sub_fetcher.normalize_lang_input(""))
-        self.assertIsNone(sub_fetcher.normalize_lang_input(None))
+        self.assertIsNone(hal.normalize_lang_input("klingon"))
+        self.assertIsNone(hal.normalize_lang_input(""))
+        self.assertIsNone(hal.normalize_lang_input(None))
         # 4-letter code that is neither a token nor a registry key.
-        self.assertIsNone(sub_fetcher.normalize_lang_input("xxxx"))
+        self.assertIsNone(hal.normalize_lang_input("xxxx"))
 
     def test_strips_punctuation(self):
         # `--lang IT.` should still resolve once normalized.
-        self.assertEqual(sub_fetcher.normalize_lang_input("it."), "ITA")
-        self.assertEqual(sub_fetcher.normalize_lang_input(" en "), "ENG")
+        self.assertEqual(hal.normalize_lang_input("it."), "ITA")
+        self.assertEqual(hal.normalize_lang_input(" en "), "ENG")
 
 
 class TestExtractLangFlag(unittest.TestCase):
     """Parsing the `--lang CODE` flag out of free-text Telegram input."""
 
     def test_no_flag_returns_query_unchanged(self):
-        cleaned, code, raw = sub_fetcher.extract_lang_flag("Punch-Drunk Love 2002")
+        cleaned, code, raw = hal.extract_lang_flag("Punch-Drunk Love 2002")
         self.assertEqual(cleaned, "Punch-Drunk Love 2002")
         self.assertIsNone(code)
         self.assertIsNone(raw)
 
     def test_flag_trailing(self):
-        cleaned, code, raw = sub_fetcher.extract_lang_flag("Punch-Drunk Love --lang ITA")
+        cleaned, code, raw = hal.extract_lang_flag("Punch-Drunk Love --lang ITA")
         self.assertEqual(cleaned, "Punch-Drunk Love")
         self.assertEqual(code, "ITA")
         self.assertEqual(raw, "ITA")
 
     def test_flag_leading(self):
-        cleaned, code, _ = sub_fetcher.extract_lang_flag("--lang JPN Spirited Away")
+        cleaned, code, _ = hal.extract_lang_flag("--lang JPN Spirited Away")
         self.assertEqual(cleaned, "Spirited Away")
         self.assertEqual(code, "JPN")
 
     def test_flag_middle(self):
-        cleaned, code, _ = sub_fetcher.extract_lang_flag("Spirited --lang JPN Away")
+        cleaned, code, _ = hal.extract_lang_flag("Spirited --lang JPN Away")
         self.assertEqual(cleaned, "Spirited Away")
         self.assertEqual(code, "JPN")
 
     def test_flag_equals_form(self):
-        cleaned, code, _ = sub_fetcher.extract_lang_flag("Film --lang=fra")
+        cleaned, code, _ = hal.extract_lang_flag("Film --lang=fra")
         self.assertEqual(cleaned, "Film")
         self.assertEqual(code, "FRA")
 
     def test_two_letter_input(self):
-        cleaned, code, raw = sub_fetcher.extract_lang_flag("Film --lang it")
+        cleaned, code, raw = hal.extract_lang_flag("Film --lang it")
         self.assertEqual(cleaned, "Film")
         self.assertEqual(code, "ITA")
         self.assertEqual(raw, "it")
 
     def test_unknown_lang_returns_raw(self):
-        cleaned, code, raw = sub_fetcher.extract_lang_flag("Film --lang klingon")
+        cleaned, code, raw = hal.extract_lang_flag("Film --lang klingon")
         self.assertEqual(cleaned, "Film")
         self.assertIsNone(code)
         self.assertEqual(raw, "klingon")
@@ -2272,7 +2272,7 @@ class TestDetectReleaseLanguagesRegistry(unittest.TestCase):
     rejects the documented false-positive substrings."""
 
     def _detect(self, title, languages=None):
-        return sub_fetcher.detect_release_languages({
+        return hal.detect_release_languages({
             "title": title,
             "languages": languages or [],
         })
@@ -2355,7 +2355,7 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
             self._rel("Movie.2024.ENG.1080p"),
             self._rel("Movie.2024.MULTi.1080p"),
         ]
-        kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
+        kept = hal.filter_releases_by_language(rels, "ITA")
         titles = [r["title"] for r in kept]
         self.assertIn("Movie.2024.ITA.1080p", titles)
         self.assertIn("Movie.2024.MULTi.1080p", titles)
@@ -2370,7 +2370,7 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
             self._rel("Movie.2024.Dual.Audio.JP-EN.1080p"),
             self._rel("Movie.2024.MULTi.1080p"),
         ]
-        kept = sub_fetcher.filter_releases_by_language(rels, "JPN")
+        kept = hal.filter_releases_by_language(rels, "JPN")
         titles = [r["title"] for r in kept]
         self.assertIn("Movie.2024.Dual.Audio.JP-EN.1080p", titles)
         self.assertIn("Movie.2024.MULTi.1080p", titles)
@@ -2378,11 +2378,11 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
 
     def test_none_target_returns_input_unchanged(self):
         rels = [self._rel("A.ENG"), self._rel("B.FRA")]
-        self.assertEqual(sub_fetcher.filter_releases_by_language(rels, None), rels)
+        self.assertEqual(hal.filter_releases_by_language(rels, None), rels)
 
     def test_zero_matches_returns_empty(self):
         rels = [self._rel("Movie.2024.ENG.1080p"), self._rel("Movie.2024.FRA.1080p")]
-        self.assertEqual(sub_fetcher.filter_releases_by_language(rels, "JPN"), [])
+        self.assertEqual(hal.filter_releases_by_language(rels, "JPN"), [])
 
     def test_marker_with_other_concrete_lang_is_kept_low_score(self):
         # Soft filter: target=ITA keeps explicit ITA at top, then MULTI alone,
@@ -2397,7 +2397,7 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
             self._rel("Luca.2021.WEBRip.1080p.MULTi.x264"),
             self._rel("Luca.2021.WEBRip.1080p.ENG.x264"),
         ]
-        kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
+        kept = hal.filter_releases_by_language(rels, "ITA")
         titles = [r["title"] for r in kept]
         # Order matters: ITA (1000) → MULTI alone (600) → MULTI+other (400) → DUAL+other (200)
         self.assertEqual(titles[0], "Luca.2021.WEBRip.1080p.ITA.x264")
@@ -2411,7 +2411,7 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
 
     def test_score_levels_for_each_release_shape(self):
         # Pin the confidence scale so future tweaks are intentional.
-        score = sub_fetcher.score_release_language_confidence
+        score = hal.score_release_language_confidence
         self.assertEqual(score(self._rel("Movie.ITA.1080p"), "ITA"), 1000)
         self.assertEqual(score(self._rel("Movie.MULTi.1080p"), "ITA"), 600)
         self.assertEqual(score(self._rel("Movie.DUAL.Audio.1080p"), "ITA"), 500)
@@ -2428,7 +2428,7 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
             self._rel("Movie.2024.DUAL.ITA-ENG.1080p"),
             self._rel("Movie.2024.MULTi-ITA.1080p"),
         ]
-        kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
+        kept = hal.filter_releases_by_language(rels, "ITA")
         self.assertEqual(len(kept), 2)
 
     def test_technical_tags_are_not_misdetected_as_languages(self):
@@ -2442,7 +2442,7 @@ class TestFilterReleasesByLanguage(unittest.TestCase):
             self._rel("Movie.2024.WEBRip.NO-RETAG.1080p"),
             self._rel("Movie.2024.ITA.BRRip.1080p"),
         ]
-        kept = sub_fetcher.filter_releases_by_language(rels, "ITA")
+        kept = hal.filter_releases_by_language(rels, "ITA")
         titles = [r["title"] for r in kept]
         self.assertEqual(titles, ["Movie.2024.ITA.BRRip.1080p"])
 
@@ -2453,32 +2453,32 @@ class TestAudioMediaInfoParser(unittest.TestCase):
     def test_pirate_bay_real_descr(self):
         # Verbatim sample from apibay.org for Luca.2021.MULTi.1080p.WEB.H264-LOST
         text = "  . Audio ... : English E-AC-3 5.1 / French E-AC-3 5.1\n  . Subs .... : Forced Srt / French Srt / English Srt"
-        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        found = hal._scrape_audio_from_mediainfo_text(text)
         self.assertEqual(found, {"ENG", "FRA"})
 
     def test_italian_mediainfo_block(self):
         text = "Audio: Italian AC3 5.1 / English DTS"
-        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        found = hal._scrape_audio_from_mediainfo_text(text)
         self.assertEqual(found, {"ITA", "ENG"})
 
     def test_language_field_only(self):
         text = "Format    : Matroska\nLanguage  : Italian\nLanguage  : English"
-        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        found = hal._scrape_audio_from_mediainfo_text(text)
         self.assertEqual(found, {"ITA", "ENG"})
 
     def test_no_audio_info(self):
         text = "Just a generic description with no track info."
-        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        found = hal._scrape_audio_from_mediainfo_text(text)
         self.assertEqual(found, set())
 
     def test_empty_input(self):
-        self.assertEqual(sub_fetcher._scrape_audio_from_mediainfo_text(""), set())
-        self.assertEqual(sub_fetcher._scrape_audio_from_mediainfo_text(None), set())
+        self.assertEqual(hal._scrape_audio_from_mediainfo_text(""), set())
+        self.assertEqual(hal._scrape_audio_from_mediainfo_text(None), set())
 
     def test_markers_are_filtered_out(self):
         # The parser must never return MULTI/DUAL as a resolved language.
         text = "Audio: MULTI 5.1\nLanguage: DUAL"
-        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        found = hal._scrape_audio_from_mediainfo_text(text)
         self.assertEqual(found, set())
 
     def test_storyline_with_italian_word_does_not_leak(self):
@@ -2496,7 +2496,7 @@ class TestAudioMediaInfoParser(unittest.TestCase):
             "Italian city Portorosso, spends his daily routine herding "
             "goatfish."
         )
-        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        found = hal._scrape_audio_from_mediainfo_text(text)
         self.assertEqual(found, {"HIN", "ENG"})
         self.assertNotIn("ITA", found)
 
@@ -2505,7 +2505,7 @@ class TestAudioMediaInfoParser(unittest.TestCase):
         # wander into narrative prose attached after a structured header.
         long_payload = "English / " + ("X" * 200) + " / Italian"
         text = f"Audio: {long_payload}"
-        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        found = hal._scrape_audio_from_mediainfo_text(text)
         # English is within the first 120 chars; "Italian" is past the cap.
         self.assertIn("ENG", found)
         self.assertNotIn("ITA", found)
@@ -2514,7 +2514,7 @@ class TestAudioMediaInfoParser(unittest.TestCase):
         # A sentence containing "Audio quality is great" must not be parsed
         # as a track header just because the word Audio appears.
         text = "Note: Audio quality is great: Italian dubs available"
-        found = sub_fetcher._scrape_audio_from_mediainfo_text(text)
+        found = hal._scrape_audio_from_mediainfo_text(text)
         # "Audio" here is not the FIRST alphabetic word of the line, but the
         # current regex `^[\s\W]*Audio\b...` accepts decorative punctuation
         # before the keyword. "Note: " starts with alpha "N" → does NOT match.
@@ -2527,10 +2527,10 @@ class TestScoreWithScrape(unittest.TestCase):
     ambiguous (200..600) parser scores."""
 
     def setUp(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def tearDown(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def _rel(self, title, info_hash="h1"):
         return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
@@ -2538,8 +2538,8 @@ class TestScoreWithScrape(unittest.TestCase):
 
     def test_scrape_confirms_target_bumps_to_1000(self):
         rel = self._rel("Movie.MULTi.1080p.WEB")
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
-        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
+        score = hal.score_release_language_confidence(rel, "ITA")
         self.assertEqual(score, 1000)
 
     def test_scrape_refutes_target_keeps_low_score(self):
@@ -2549,17 +2549,17 @@ class TestScoreWithScrape(unittest.TestCase):
         # (sub track instead of audio, missing MediaInfo line, etc).
         rel = self._rel("Luca.2021.MULTi.1080p.WEB.H264-LOST")
         rel["languages"] = [{"id": 1, "name": "English"}]
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "FRA"}
-        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
-        self.assertEqual(score, sub_fetcher._SCRAPE_REFUTED_SCORE)
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "FRA"}
+        score = hal.score_release_language_confidence(rel, "ITA")
+        self.assertEqual(score, hal._SCRAPE_REFUTED_SCORE)
 
     def test_scrape_confirms_target_on_single_lang_release(self):
         # Even a pure ENG release (no MULTI/DUAL) gets promoted to 1000 when
         # the scraper finds ITA in the audio track list.
         rel = self._rel("Movie.ENG.1080p")
         rel["languages"] = [{"id": 1, "name": "English"}]
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "ITA"}
-        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "ITA"}
+        score = hal.score_release_language_confidence(rel, "ITA")
         self.assertEqual(score, 1000)
 
     def test_scrape_refutes_single_lang_release_keeps_low_score(self):
@@ -2567,36 +2567,36 @@ class TestScoreWithScrape(unittest.TestCase):
         # so the user can still see it under the "refuted" marker.
         rel = self._rel("Movie.ENG.1080p")
         rel["languages"] = [{"id": 1, "name": "English"}]
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG"}
-        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
-        self.assertEqual(score, sub_fetcher._SCRAPE_REFUTED_SCORE)
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG"}
+        score = hal.score_release_language_confidence(rel, "ITA")
+        self.assertEqual(score, hal._SCRAPE_REFUTED_SCORE)
 
     def test_scrape_empty_set_keeps_parser_score(self):
         # Empty set (cached as set()) means scrape ran but found no audio info.
         # The parser score (here 600 for MULTi alone) is retained.
         rel = self._rel("Movie.MULTi.1080p")
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = set()
-        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = set()
+        score = hal.score_release_language_confidence(rel, "ITA")
         self.assertEqual(score, 600)
 
     def test_scrape_none_keeps_parser_score(self):
         # Scrape failed (network error, no api etc). Cache stores None.
         rel = self._rel("Movie.MULTi.1080p")
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None
-        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None
+        score = hal.score_release_language_confidence(rel, "ITA")
         self.assertEqual(score, 600)
 
     def test_explicit_match_skips_scrape(self):
         # If parser already says target=ITA explicitly, the scrape is not
         # consulted (and not even cached). Score is 1000.
         rel = self._rel("Movie.ITA.1080p")
-        score = sub_fetcher.score_release_language_confidence(rel, "ITA")
+        score = hal.score_release_language_confidence(rel, "ITA")
         self.assertEqual(score, 1000)
 
     def test_allow_scrape_false_keeps_parser_score(self):
         rel = self._rel("Movie.MULTi.ENG.1080p")
         rel["languages"] = [{"id": 1, "name": "English"}]
-        score = sub_fetcher.score_release_language_confidence(rel, "ITA", allow_scrape=False)
+        score = hal.score_release_language_confidence(rel, "ITA", allow_scrape=False)
         self.assertEqual(score, 400)
 
 
@@ -2605,10 +2605,10 @@ class TestConfidenceDescription(unittest.TestCase):
     confirm card."""
 
     def setUp(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def tearDown(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def _rel(self, title, info_hash="h-desc"):
         return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
@@ -2616,41 +2616,41 @@ class TestConfidenceDescription(unittest.TestCase):
 
     def test_no_target_returns_empty_string(self):
         rel = self._rel("Movie.MULTi.1080p")
-        self.assertEqual(sub_fetcher._confidence_description(rel, None), "")
+        self.assertEqual(hal._confidence_description(rel, None), "")
 
     def test_explicit_target_is_confirmed(self):
         rel = self._rel("Movie.ITA.1080p")
-        desc = sub_fetcher._confidence_description(rel, "ITA")
+        desc = hal._confidence_description(rel, "ITA")
         self.assertIn("✅", desc)
         self.assertIn("ITA", desc)
 
     def test_scrape_confirms_target(self):
         rel = self._rel("Movie.MULTi.1080p")
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
-        desc = sub_fetcher._confidence_description(rel, "ITA")
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
+        desc = hal._confidence_description(rel, "ITA")
         self.assertIn("✅", desc)
         self.assertIn("scrape", desc.lower())
 
     def test_scrape_refuted_returns_warning(self):
         rel = self._rel("Movie.MULTi.1080p")
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "FRA"}
-        desc = sub_fetcher._confidence_description(rel, "ITA")
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ENG", "FRA"}
+        desc = hal._confidence_description(rel, "ITA")
         self.assertIn("🚫", desc)
         self.assertIn("ENG", desc)
         self.assertIn("FRA", desc)
 
     def test_multi_alone_is_ambiguous(self):
         rel = self._rel("Movie.MULTi.1080p")
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None  # no scrape result
-        desc = sub_fetcher._confidence_description(rel, "ITA")
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None  # no scrape result
+        desc = hal._confidence_description(rel, "ITA")
         self.assertIn("⚠️", desc)
         self.assertIn("MULTI", desc)
 
     def test_dual_with_other_is_uncertain(self):
         rel = self._rel("Movie.DUAL.ENG.1080p")
         rel["languages"] = [{"id": 1, "name": "English"}]
-        sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None
-        desc = sub_fetcher._confidence_description(rel, "ITA")
+        hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None
+        desc = hal._confidence_description(rel, "ITA")
         self.assertIn("❓", desc)
         self.assertIn("DUAL", desc)
 
@@ -2659,10 +2659,10 @@ class TestPickerLegend(unittest.TestCase):
     """Verify the emoji legend that appears above the release picker."""
 
     def setUp(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def tearDown(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def _rel(self, title, info_hash):
         return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
@@ -2670,12 +2670,12 @@ class TestPickerLegend(unittest.TestCase):
 
     def test_no_legend_when_all_confirmed(self):
         rels = [self._rel("Movie.ITA.1080p", "h1")]
-        self.assertEqual(sub_fetcher._picker_confidence_legend(rels, "ITA"), "")
+        self.assertEqual(hal._picker_confidence_legend(rels, "ITA"), "")
 
     def test_legend_with_warn_only(self):
         rels = [self._rel("Movie.MULTi.1080p", "h2"),
                 self._rel("Movie.ITA.1080p", "h3")]
-        legend = sub_fetcher._picker_confidence_legend(rels, "ITA")
+        legend = hal._picker_confidence_legend(rels, "ITA")
         self.assertIn("⚠️", legend)
         self.assertNotIn("❓", legend)
         self.assertNotIn("🚫", legend)
@@ -2686,10 +2686,10 @@ class TestPickerLegend(unittest.TestCase):
         r_quest = self._rel("Movie.DUAL.ENG.1080p", "h-quest")
         r_quest["languages"] = [{"id": 1, "name": "English"}]
         r_block = self._rel("Movie.MULTi.1080p", "h-block")
-        sub_fetcher._AUDIO_SCRAPE_CACHE["h-block"] = {"ENG", "FRA"}
-        sub_fetcher._AUDIO_SCRAPE_CACHE["h-warn"] = None
-        sub_fetcher._AUDIO_SCRAPE_CACHE["h-quest"] = None
-        legend = sub_fetcher._picker_confidence_legend([r_warn, r_quest, r_block], "ITA")
+        hal._AUDIO_SCRAPE_CACHE["h-block"] = {"ENG", "FRA"}
+        hal._AUDIO_SCRAPE_CACHE["h-warn"] = None
+        hal._AUDIO_SCRAPE_CACHE["h-quest"] = None
+        legend = hal._picker_confidence_legend([r_warn, r_quest, r_block], "ITA")
         self.assertIn("⚠️", legend)
         self.assertIn("❓", legend)
         self.assertIn("🚫", legend)
@@ -2706,15 +2706,15 @@ class TestTpbScraperIdExtraction(unittest.TestCase):
         mock_resp.read.return_value = sample.encode()
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
-        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=mock_resp) as up:
-            found = sub_fetcher._scrape_audio_tpb("https://thepiratebay.org/description.php?id=47222815")
+        with patch.object(hal.urllib.request, "urlopen", return_value=mock_resp) as up:
+            found = hal._scrape_audio_tpb("https://thepiratebay.org/description.php?id=47222815")
             args, _ = up.call_args
             req = args[0]
             self.assertIn("apibay.org/t.php?id=47222815", req.full_url)
         self.assertEqual(found, {"ITA", "ENG"})
 
     def test_returns_none_when_no_id(self):
-        found = sub_fetcher._scrape_audio_tpb("https://thepiratebay.org/random/path")
+        found = hal._scrape_audio_tpb("https://thepiratebay.org/random/path")
         self.assertIsNone(found)
 
 
@@ -2723,11 +2723,11 @@ class TestTmdbOriginalLanguageByTmdbId(unittest.TestCase):
     handles missing keys / unreachable network."""
 
     def setUp(self):
-        self._orig_key = sub_fetcher.TMDB_API_KEY
-        sub_fetcher.TMDB_API_KEY = "fake-key"
+        self._orig_key = hal.TMDB_API_KEY
+        hal.TMDB_API_KEY = "fake-key"
 
     def tearDown(self):
-        sub_fetcher.TMDB_API_KEY = self._orig_key
+        hal.TMDB_API_KEY = self._orig_key
 
     def test_returns_iso1_code(self):
         from unittest.mock import patch, MagicMock
@@ -2737,20 +2737,20 @@ class TestTmdbOriginalLanguageByTmdbId(unittest.TestCase):
         resp.__exit__ = lambda *a: None
         with patch("urllib.request.urlopen", return_value=resp):
             self.assertEqual(
-                sub_fetcher.tmdb_get_original_language_for_tmdb_id(12345),
+                hal.tmdb_get_original_language_for_tmdb_id(12345),
                 "ja",
             )
 
     def test_none_without_api_key(self):
-        sub_fetcher.TMDB_API_KEY = ""
-        self.assertIsNone(sub_fetcher.tmdb_get_original_language_for_tmdb_id(12345))
+        hal.TMDB_API_KEY = ""
+        self.assertIsNone(hal.tmdb_get_original_language_for_tmdb_id(12345))
 
     def test_iso1_to_code_mapping(self):
-        self.assertEqual(sub_fetcher.tmdb_iso1_to_code("ja"), "JPN")
-        self.assertEqual(sub_fetcher.tmdb_iso1_to_code("it"), "ITA")
-        self.assertEqual(sub_fetcher.tmdb_iso1_to_code("en"), "ENG")
-        self.assertIsNone(sub_fetcher.tmdb_iso1_to_code("xx"))
-        self.assertIsNone(sub_fetcher.tmdb_iso1_to_code(None))
+        self.assertEqual(hal.tmdb_iso1_to_code("ja"), "JPN")
+        self.assertEqual(hal.tmdb_iso1_to_code("it"), "ITA")
+        self.assertEqual(hal.tmdb_iso1_to_code("en"), "ENG")
+        self.assertIsNone(hal.tmdb_iso1_to_code("xx"))
+        self.assertIsNone(hal.tmdb_iso1_to_code(None))
 
 
 class TestVerifyAudioLanguage(unittest.TestCase):
@@ -2773,13 +2773,13 @@ class TestVerifyAudioLanguage(unittest.TestCase):
 
     def test_none_required_returns_true(self):
         # `required_code=None` is the "no filter" sentinel; never inspects ffprobe.
-        self.assertTrue(sub_fetcher.verify_audio_language("/fake/video.mkv", None))
+        self.assertTrue(hal.verify_audio_language("/fake/video.mkv", None))
 
     def test_ita_match_on_language_tag(self):
         import subprocess
         orig = self._mock_ffprobe([{"tags": {"language": "ita", "title": ""}}])
         try:
-            self.assertTrue(sub_fetcher.verify_audio_language("/fake/video.mkv", "ITA"))
+            self.assertTrue(hal.verify_audio_language("/fake/video.mkv", "ITA"))
         finally:
             subprocess.run = orig
 
@@ -2787,7 +2787,7 @@ class TestVerifyAudioLanguage(unittest.TestCase):
         import subprocess
         orig = self._mock_ffprobe([{"tags": {"language": "eng", "title": "English"}}])
         try:
-            self.assertFalse(sub_fetcher.verify_audio_language("/fake/video.mkv", "ITA"))
+            self.assertFalse(hal.verify_audio_language("/fake/video.mkv", "ITA"))
         finally:
             subprocess.run = orig
 
@@ -2795,7 +2795,7 @@ class TestVerifyAudioLanguage(unittest.TestCase):
         import subprocess
         orig = self._mock_ffprobe([{"tags": {"language": "jpn", "title": "Japanese 5.1"}}])
         try:
-            self.assertTrue(sub_fetcher.verify_audio_language("/fake/video.mkv", "JPN"))
+            self.assertTrue(hal.verify_audio_language("/fake/video.mkv", "JPN"))
         finally:
             subprocess.run = orig
 
@@ -2803,14 +2803,14 @@ class TestVerifyAudioLanguage(unittest.TestCase):
         import subprocess
         orig = self._mock_ffprobe([{"tags": {"title": "Japanese"}}])
         try:
-            self.assertTrue(sub_fetcher.verify_audio_language("/fake/video.mkv", "JPN"))
+            self.assertTrue(hal.verify_audio_language("/fake/video.mkv", "JPN"))
         finally:
             subprocess.run = orig
 
     def test_unknown_code_returns_false(self):
         # Codes outside LANGUAGE_REGISTRY (e.g. accidentally passing "XX") must
         # fail closed instead of crashing.
-        self.assertFalse(sub_fetcher.verify_audio_language("/fake/video.mkv", "XYZ"))
+        self.assertFalse(hal.verify_audio_language("/fake/video.mkv", "XYZ"))
 
     def test_ffprobe_missing_returns_false(self):
         import subprocess
@@ -2821,7 +2821,7 @@ class TestVerifyAudioLanguage(unittest.TestCase):
 
         subprocess.run = mock_run
         try:
-            self.assertFalse(sub_fetcher.verify_audio_language("/fake/video.mkv", "ITA"))
+            self.assertFalse(hal.verify_audio_language("/fake/video.mkv", "ITA"))
         finally:
             subprocess.run = original_run
 
@@ -2831,13 +2831,13 @@ class TestItaCommandAlias(unittest.TestCase):
     as /scarica with --lang ITA, and must appear in the help registry."""
 
     def test_ita_resolves_in_command_registry(self):
-        spec = sub_fetcher._find_command("/ita")
+        spec = hal._find_command("/ita")
         self.assertIsNotNone(spec)
         self.assertEqual(spec["canonical"], "/ita")
 
     def test_ita_appears_in_did_you_mean(self):
         # User mistypes "/itaa" -> suggestion should be "/ita".
-        self.assertEqual(sub_fetcher._suggest_command("/itaa"), "/ita")
+        self.assertEqual(hal._suggest_command("/itaa"), "/ita")
 
     def test_ita_enqueues_lang_ita_job(self):
         # Tap into the download queue and assert the job pushed by /ita has
@@ -2849,18 +2849,18 @@ class TestItaCommandAlias(unittest.TestCase):
         def fake_put(item, *args, **kwargs):
             captured.append(item)
 
-        with patch.object(sub_fetcher.download_queue, "put", side_effect=fake_put), \
-                patch.object(sub_fetcher, "tg_send", return_value={"ok": True, "result": {"message_id": 1}}), \
-                patch.object(sub_fetcher, "queue_position", return_value=0):
+        with patch.object(hal.download_queue, "put", side_effect=fake_put), \
+                patch.object(hal, "tg_send", return_value={"ok": True, "result": {"message_id": 1}}), \
+                patch.object(hal, "queue_position", return_value=0):
             # Force the Radarr-config gate to pass.
-            orig_url, orig_key = sub_fetcher.RADARR_URL, sub_fetcher.RADARR_API_KEY
-            sub_fetcher.RADARR_URL = "http://fake-radarr"
-            sub_fetcher.RADARR_API_KEY = "fake"
+            orig_url, orig_key = hal.RADARR_URL, hal.RADARR_API_KEY
+            hal.RADARR_URL = "http://fake-radarr"
+            hal.RADARR_API_KEY = "fake"
             try:
-                sub_fetcher._cmd_ita("Punch-Drunk Love", state={}, excludes=[])
+                hal._cmd_ita("Punch-Drunk Love", state={}, excludes=[])
             finally:
-                sub_fetcher.RADARR_URL = orig_url
-                sub_fetcher.RADARR_API_KEY = orig_key
+                hal.RADARR_URL = orig_url
+                hal.RADARR_API_KEY = orig_key
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0]["type"], "scarica")
@@ -2873,22 +2873,22 @@ class TestFlagFormatting(unittest.TestCase):
     """Verify _flag_for emits the right flag for the extended registry."""
 
     def test_ita_wins_when_mixed(self):
-        self.assertEqual(sub_fetcher._flag_for(["ITA", "ENG"]), "🇮🇹")
+        self.assertEqual(hal._flag_for(["ITA", "ENG"]), "🇮🇹")
 
     def test_jpn_solo(self):
-        self.assertEqual(sub_fetcher._flag_for(["JPN"]), "🇯🇵")
+        self.assertEqual(hal._flag_for(["JPN"]), "🇯🇵")
 
     def test_kor_solo(self):
-        self.assertEqual(sub_fetcher._flag_for(["KOR"]), "🇰🇷")
+        self.assertEqual(hal._flag_for(["KOR"]), "🇰🇷")
 
     def test_multi_marker(self):
-        self.assertEqual(sub_fetcher._flag_for(["MULTI"]), "🌐")
+        self.assertEqual(hal._flag_for(["MULTI"]), "🌐")
 
     def test_dual_marker(self):
-        self.assertEqual(sub_fetcher._flag_for(["DUAL"]), "🎭")
+        self.assertEqual(hal._flag_for(["DUAL"]), "🎭")
 
     def test_unknown(self):
-        self.assertEqual(sub_fetcher._flag_for(["?"]), "❔")
+        self.assertEqual(hal._flag_for(["?"]), "❔")
 
 
 class TestPrefetchAudioScrapes(unittest.TestCase):
@@ -2897,10 +2897,10 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
     always replaced by a stub — no real network is ever touched."""
 
     def setUp(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def tearDown(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def _rel(self, info_hash, langs=None, title=None):
         return {
@@ -2913,8 +2913,8 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
 
     def test_no_releases_is_noop(self):
         from unittest.mock import patch
-        with patch.object(sub_fetcher, "tg_edit_message") as edit:
-            fetched = sub_fetcher._prefetch_audio_scrapes(
+        with patch.object(hal, "tg_edit_message") as edit:
+            fetched = hal._prefetch_audio_scrapes(
                 [], progress_msg_id=42, target_lang="ITA",
             )
         self.assertEqual(fetched, 0)
@@ -2925,9 +2925,9 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
         # helper must skip even with a full release list.
         from unittest.mock import patch
         rels = [self._rel("a"), self._rel("b")]
-        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
-             patch.object(sub_fetcher, "get_release_audio_languages") as scrape:
-            fetched = sub_fetcher._prefetch_audio_scrapes(
+        with patch.object(hal, "tg_edit_message") as edit, \
+             patch.object(hal, "get_release_audio_languages") as scrape:
+            fetched = hal._prefetch_audio_scrapes(
                 rels, progress_msg_id=42, target_lang=None,
             )
         self.assertEqual(fetched, 0)
@@ -2940,10 +2940,10 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
         from unittest.mock import patch
         rels = [self._rel("a"), self._rel("b"), self._rel("c")]
         for rel in rels:
-            sub_fetcher._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
-        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
-             patch.object(sub_fetcher, "get_release_audio_languages") as scrape:
-            fetched = sub_fetcher._prefetch_audio_scrapes(
+            hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = {"ITA", "ENG"}
+        with patch.object(hal, "tg_edit_message") as edit, \
+             patch.object(hal, "get_release_audio_languages") as scrape:
+            fetched = hal._prefetch_audio_scrapes(
                 rels, progress_msg_id=42, target_lang="ITA",
             )
         self.assertEqual(fetched, 0)
@@ -2956,9 +2956,9 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
         # short-circuit on its own.
         from unittest.mock import patch
         rel = self._rel("a", langs=["Italian"])
-        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
-             patch.object(sub_fetcher, "get_release_audio_languages") as scrape:
-            fetched = sub_fetcher._prefetch_audio_scrapes(
+        with patch.object(hal, "tg_edit_message") as edit, \
+             patch.object(hal, "get_release_audio_languages") as scrape:
+            fetched = hal._prefetch_audio_scrapes(
                 [rel], progress_msg_id=42, target_lang="ITA",
             )
         self.assertEqual(fetched, 0)
@@ -2977,10 +2977,10 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
             time.sleep(0.01)
             return {"ENG"}
 
-        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
-             patch.object(sub_fetcher, "get_release_audio_languages",
+        with patch.object(hal, "tg_edit_message") as edit, \
+             patch.object(hal, "get_release_audio_languages",
                           side_effect=fake_scrape):
-            fetched = sub_fetcher._prefetch_audio_scrapes(
+            fetched = hal._prefetch_audio_scrapes(
                 rels, progress_msg_id=42, target_lang="ITA",
                 title_label="Movie (2024)",
             )
@@ -3007,10 +3007,10 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
                 raise RuntimeError("boom")
             return {"ENG"}
 
-        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
-             patch.object(sub_fetcher, "get_release_audio_languages",
+        with patch.object(hal, "tg_edit_message") as edit, \
+             patch.object(hal, "get_release_audio_languages",
                           side_effect=fake_scrape):
-            fetched = sub_fetcher._prefetch_audio_scrapes(
+            fetched = hal._prefetch_audio_scrapes(
                 rels, progress_msg_id=42, target_lang="ITA",
             )
 
@@ -3028,10 +3028,10 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
         def fake_scrape(rel):
             return {"ENG"}
 
-        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
-             patch.object(sub_fetcher, "get_release_audio_languages",
+        with patch.object(hal, "tg_edit_message") as edit, \
+             patch.object(hal, "get_release_audio_languages",
                           side_effect=fake_scrape):
-            fetched = sub_fetcher._prefetch_audio_scrapes(
+            fetched = hal._prefetch_audio_scrapes(
                 rels, progress_msg_id=42, target_lang="ITA",
             )
 
@@ -3051,10 +3051,10 @@ class TestPrefetchAudioScrapes(unittest.TestCase):
         from unittest.mock import patch
         rels = [self._rel(f"h{i}") for i in range(3)]
 
-        with patch.object(sub_fetcher, "tg_edit_message") as edit, \
-             patch.object(sub_fetcher, "get_release_audio_languages",
+        with patch.object(hal, "tg_edit_message") as edit, \
+             patch.object(hal, "get_release_audio_languages",
                           return_value={"ENG"}):
-            fetched = sub_fetcher._prefetch_audio_scrapes(
+            fetched = hal._prefetch_audio_scrapes(
                 rels, progress_msg_id=None, target_lang="ITA",
             )
 
@@ -3067,21 +3067,21 @@ class TestPartitionVisibleReleases(unittest.TestCase):
     a toggle and falls back to the full list when the filter would empty it."""
 
     def setUp(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def tearDown(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def _rel(self, title, info_hash, scraped=None):
         rel = {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
                "infoHash": info_hash}
-        sub_fetcher._AUDIO_SCRAPE_CACHE[info_hash] = scraped
+        hal._AUDIO_SCRAPE_CACHE[info_hash] = scraped
         return rel
 
     def test_no_target_code_returns_full_list_unchanged(self):
         rels = [self._rel("A.MULTi", "h1", scraped={"ENG", "FRA"}),
                 self._rel("B.ITA", "h2")]
-        visible, refuted = sub_fetcher._partition_visible_releases(rels, None, False)
+        visible, refuted = hal._partition_visible_releases(rels, None, False)
         self.assertEqual(visible, rels)
         self.assertEqual(refuted, 0)
 
@@ -3090,7 +3090,7 @@ class TestPartitionVisibleReleases(unittest.TestCase):
         refuted = [self._rel(f"B{i}.MULTi", f"r{i}", scraped={"ENG", "FRA"})
                    for i in range(3)]
         rels = plausible + refuted
-        visible, refuted_count = sub_fetcher._partition_visible_releases(
+        visible, refuted_count = hal._partition_visible_releases(
             rels, "ITA", show_refuted=False,
         )
         self.assertEqual(len(visible), 5)
@@ -3103,7 +3103,7 @@ class TestPartitionVisibleReleases(unittest.TestCase):
         refuted = [self._rel(f"B{i}.MULTi", f"r{i}", scraped={"ENG", "FRA"})
                    for i in range(3)]
         rels = plausible + refuted
-        visible, refuted_count = sub_fetcher._partition_visible_releases(
+        visible, refuted_count = hal._partition_visible_releases(
             rels, "ITA", show_refuted=True,
         )
         self.assertEqual(visible, rels)
@@ -3114,7 +3114,7 @@ class TestPartitionVisibleReleases(unittest.TestCase):
         # the picker is never empty.
         refuted = [self._rel(f"B{i}.MULTi", f"r{i}", scraped={"ENG", "FRA"})
                    for i in range(4)]
-        visible, refuted_count = sub_fetcher._partition_visible_releases(
+        visible, refuted_count = hal._partition_visible_releases(
             refuted, "ITA", show_refuted=False,
         )
         self.assertEqual(visible, refuted)
@@ -3122,7 +3122,7 @@ class TestPartitionVisibleReleases(unittest.TestCase):
 
     def test_no_refuted_returns_zero_count(self):
         rels = [self._rel(f"A{i}.ITA", f"p{i}") for i in range(3)]
-        visible, refuted_count = sub_fetcher._partition_visible_releases(
+        visible, refuted_count = hal._partition_visible_releases(
             rels, "ITA", show_refuted=False,
         )
         self.assertEqual(visible, rels)
@@ -3135,10 +3135,10 @@ class TestPickerLegendIncludeRefuted(unittest.TestCase):
     visible-only subset (which by construction has no refuted scores)."""
 
     def setUp(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def tearDown(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def _rel(self, title, info_hash):
         return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
@@ -3146,13 +3146,13 @@ class TestPickerLegendIncludeRefuted(unittest.TestCase):
 
     def test_include_refuted_true_forces_block_marker(self):
         rels = [self._rel("Movie.ITA.1080p", "h1")]
-        legend = sub_fetcher._picker_confidence_legend(rels, "ITA", include_refuted=True)
+        legend = hal._picker_confidence_legend(rels, "ITA", include_refuted=True)
         self.assertIn("🚫", legend)
 
     def test_include_refuted_false_suppresses_block_marker(self):
         r_block = self._rel("Movie.MULTi.1080p", "h-block")
-        sub_fetcher._AUDIO_SCRAPE_CACHE["h-block"] = {"ENG", "FRA"}
-        legend = sub_fetcher._picker_confidence_legend(
+        hal._AUDIO_SCRAPE_CACHE["h-block"] = {"ENG", "FRA"}
+        legend = hal._picker_confidence_legend(
             [r_block], "ITA", include_refuted=False,
         )
         self.assertNotIn("🚫", legend)
@@ -3164,37 +3164,37 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_req_file = sub_fetcher.REQUESTS_FILE
-        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        self._orig_req_file = hal.REQUESTS_FILE
+        hal.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+        hal._AUDIO_SCRAPE_CACHE.clear()
         self.sent = []
         self.edited = []
-        self._orig_send = sub_fetcher.tg_send
-        self._orig_edit = sub_fetcher.tg_edit_message
-        sub_fetcher.tg_send = lambda body, **kw: self.sent.append((body, kw)) or {"ok": True}
-        sub_fetcher.tg_edit_message = lambda mid, body, **kw: self.edited.append((mid, body, kw)) or {"ok": True}
+        self._orig_send = hal.tg_send
+        self._orig_edit = hal.tg_edit_message
+        hal.tg_send = lambda body, **kw: self.sent.append((body, kw)) or {"ok": True}
+        hal.tg_edit_message = lambda mid, body, **kw: self.edited.append((mid, body, kw)) or {"ok": True}
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
-        sub_fetcher.REQUESTS_FILE = self._orig_req_file
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
-        sub_fetcher.tg_send = self._orig_send
-        sub_fetcher.tg_edit_message = self._orig_edit
+        hal.REQUESTS_FILE = self._orig_req_file
+        hal._AUDIO_SCRAPE_CACHE.clear()
+        hal.tg_send = self._orig_send
+        hal.tg_edit_message = self._orig_edit
 
     def _rel(self, title, info_hash, scraped=None):
-        sub_fetcher._AUDIO_SCRAPE_CACHE[info_hash] = scraped
+        hal._AUDIO_SCRAPE_CACHE[info_hash] = scraped
         return {"title": title, "languages": [], "infoUrl": "http://x/?id=1",
                 "infoHash": info_hash, "size": 1, "seeders": 1, "leechers": 0,
                 "quality": {"quality": {"name": "1080p"}}, "rejections": []}
 
     def _seed_session(self, film_hash, releases, lang="ITA", show_refuted=False):
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         rs.setdefault("pending_radarr", {})[f"film:{film_hash}"] = {
             "tmdb_id": 1, "movie_id": 1, "title": "Foo", "year": 2024,
             "releases": releases, "lang": lang, "lang_source": "explicit",
             "show_refuted": show_refuted, "ts": "2024-01-01T00:00:00",
         }
-        sub_fetcher.save_requests(rs)
+        hal.save_requests(rs)
 
     def _last_keyboard(self):
         if self.sent:
@@ -3211,7 +3211,7 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
         refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
                    for i in range(3)]
         self._seed_session("abc", plausible + refuted)
-        sub_fetcher._render_release_page("abc", page=0)
+        hal._render_release_page("abc", page=0)
         kb = self._last_keyboard()
         rel_rows = [row for row in kb if row[0]["callback_data"].startswith("radarr_rel:")]
         self.assertEqual(len(rel_rows), 5)
@@ -3225,7 +3225,7 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
         refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
                    for i in range(3)]
         self._seed_session("abc", plausible + refuted, show_refuted=True)
-        sub_fetcher._render_release_page("abc", page=0)
+        hal._render_release_page("abc", page=0)
         kb = self._last_keyboard()
         rel_rows = [row for row in kb if row[0]["callback_data"].startswith("radarr_rel:")]
         self.assertEqual(len(rel_rows), 8)
@@ -3238,8 +3238,8 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
         refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
                    for i in range(4)]
         self._seed_session("abc", refuted)
-        sub_fetcher._render_release_page("abc", page=0)
-        rs = sub_fetcher.load_requests()
+        hal._render_release_page("abc", page=0)
+        rs = hal.load_requests()
         entry = rs["pending_radarr"]["film:abc"]
         self.assertTrue(entry["show_refuted"])
         kb = self._last_keyboard()
@@ -3252,7 +3252,7 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
     def test_no_target_code_disables_toggle(self):
         rels = [self._rel(f"A{i}.ENG.1080p", f"p{i}") for i in range(3)]
         self._seed_session("abc", rels, lang=None)
-        sub_fetcher._render_release_page("abc", page=0)
+        hal._render_release_page("abc", page=0)
         kb = self._last_keyboard()
         toggle = [row for row in kb if row[0]["callback_data"].startswith("radarr_toggle_refuted:")]
         self.assertEqual(toggle, [])
@@ -3264,7 +3264,7 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
         refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
                    for i in range(4)]
         self._seed_session("abc", plausible + refuted)
-        sub_fetcher._render_release_page("abc", page=0)
+        hal._render_release_page("abc", page=0)
         body = self._last_body()
         self.assertIn("pagina 1/1", body)
         self.assertIn("8 totali", body)
@@ -3274,11 +3274,11 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
         refuted = [self._rel(f"B{i}.MULTi.1080p", f"r{i}", scraped={"ENG", "FRA"})
                    for i in range(4)]
         self._seed_session("abc", plausible + refuted, show_refuted=True)
-        sub_fetcher._render_release_page("abc", page=0)
+        hal._render_release_page("abc", page=0)
         body_p0 = self._last_body()
         self.assertIn("pagina 1/2", body_p0)
         self.assertIn("12 totali", body_p0)
-        sub_fetcher._render_release_page("abc", page=1)
+        hal._render_release_page("abc", page=1)
         kb = self._last_keyboard()
         rel_rows = [row for row in kb if row[0]["callback_data"].startswith("radarr_rel:")]
         self.assertEqual(len(rel_rows), 4)
@@ -3290,13 +3290,13 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
                    for i in range(2)]
         self._seed_session("abc", plausible + refuted, show_refuted=False)
 
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         entry = rs["pending_radarr"]["film:abc"]
         self.assertFalse(entry["show_refuted"])
         entry["show_refuted"] = not entry.get("show_refuted", False)
-        sub_fetcher.save_requests(rs)
+        hal.save_requests(rs)
 
-        reloaded = sub_fetcher.load_requests()
+        reloaded = hal.load_requests()
         self.assertTrue(reloaded["pending_radarr"]["film:abc"]["show_refuted"])
 
 
@@ -3315,23 +3315,23 @@ class TestNormalizeLanguageWord(unittest.TestCase):
     DUAL noise out of token-by-token language extraction."""
 
     def test_english_maps_to_eng(self):
-        self.assertEqual(sub_fetcher._normalize_language_word("English"), "ENG")
+        self.assertEqual(hal._normalize_language_word("English"), "ENG")
 
     def test_lowercase_italian_maps_to_ita(self):
-        self.assertEqual(sub_fetcher._normalize_language_word("italian"), "ITA")
+        self.assertEqual(hal._normalize_language_word("italian"), "ITA")
 
     def test_multi_marker_is_filtered_out(self):
-        self.assertIsNone(sub_fetcher._normalize_language_word("MULTI"))
+        self.assertIsNone(hal._normalize_language_word("MULTI"))
 
     def test_dual_marker_is_filtered_out(self):
-        self.assertIsNone(sub_fetcher._normalize_language_word("DUAL"))
+        self.assertIsNone(hal._normalize_language_word("DUAL"))
 
     def test_unknown_word_returns_none(self):
-        self.assertIsNone(sub_fetcher._normalize_language_word("xyz"))
+        self.assertIsNone(hal._normalize_language_word("xyz"))
 
     def test_empty_word_returns_none(self):
-        self.assertIsNone(sub_fetcher._normalize_language_word(""))
-        self.assertIsNone(sub_fetcher._normalize_language_word(None))
+        self.assertIsNone(hal._normalize_language_word(""))
+        self.assertIsNone(hal._normalize_language_word(None))
 
 
 class _MockResponse:
@@ -3361,10 +3361,10 @@ class TestScraperExpansion(unittest.TestCase):
     """1337x / YTS / TorrentGalaxy scrapers + dispatcher routing."""
 
     def setUp(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     def tearDown(self):
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal._AUDIO_SCRAPE_CACHE.clear()
 
     # ---------- 1337x ----------
     def test_1337x_parses_language_block(self):
@@ -3374,29 +3374,29 @@ class TestScraperExpansion(unittest.TestCase):
             "<li><strong>Language</strong><span>English</span></li>"
             "</ul></body></html>"
         )
-        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse(html)):
-            found = sub_fetcher._scrape_audio_1337x("https://1337x.to/torrent/12345/movie-slug/")
+        with patch.object(hal.urllib.request, "urlopen", return_value=_MockResponse(html)):
+            found = hal._scrape_audio_1337x("https://1337x.to/torrent/12345/movie-slug/")
         self.assertEqual(found, {"ENG"})
 
     def test_1337x_falls_back_to_mediainfo_when_no_block(self):
         from unittest.mock import patch
         html = "<html><body>\nAudio: Italian AC3 / English DTS\n</body></html>"
-        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse(html)):
-            found = sub_fetcher._scrape_audio_1337x("https://1337x.unblocked.lc/torrent/9/foo/")
+        with patch.object(hal.urllib.request, "urlopen", return_value=_MockResponse(html)):
+            found = hal._scrape_audio_1337x("https://1337x.unblocked.lc/torrent/9/foo/")
         self.assertEqual(found, {"ITA", "ENG"})
 
     def test_1337x_network_error_returns_none(self):
         from unittest.mock import patch
         def boom(*a, **kw):
             raise OSError("network down")
-        with patch.object(sub_fetcher.urllib.request, "urlopen", side_effect=boom):
-            self.assertIsNone(sub_fetcher._scrape_audio_1337x("https://1337x.to/torrent/1/x/"))
+        with patch.object(hal.urllib.request, "urlopen", side_effect=boom):
+            self.assertIsNone(hal._scrape_audio_1337x("https://1337x.to/torrent/1/x/"))
 
     # ---------- YTS ----------
     def test_yts_returns_eng_when_page_loads(self):
         from unittest.mock import patch
-        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse("<html>ok</html>")):
-            found = sub_fetcher._scrape_audio_yts("https://yts.mx/movies/some-movie-2021", None)
+        with patch.object(hal.urllib.request, "urlopen", return_value=_MockResponse("<html>ok</html>")):
+            found = hal._scrape_audio_yts("https://yts.mx/movies/some-movie-2021", None)
         self.assertEqual(found, {"ENG"})
 
     def test_yts_uses_api_when_imdb_id_present(self):
@@ -3407,8 +3407,8 @@ class TestScraperExpansion(unittest.TestCase):
             captured["url"] = req.full_url
             return _MockResponse(b'{"status":"ok"}')
 
-        with patch.object(sub_fetcher.urllib.request, "urlopen", side_effect=fake_urlopen):
-            found = sub_fetcher._scrape_audio_yts(
+        with patch.object(hal.urllib.request, "urlopen", side_effect=fake_urlopen):
+            found = hal._scrape_audio_yts(
                 "https://yts.mx/movies/foo",
                 {"imdbId": "tt0111161"},
             )
@@ -3419,33 +3419,33 @@ class TestScraperExpansion(unittest.TestCase):
         from unittest.mock import patch
         def boom(*a, **kw):
             raise OSError("nope")
-        with patch.object(sub_fetcher.urllib.request, "urlopen", side_effect=boom):
-            self.assertIsNone(sub_fetcher._scrape_audio_yts("https://yts.mx/movies/x", None))
+        with patch.object(hal.urllib.request, "urlopen", side_effect=boom):
+            self.assertIsNone(hal._scrape_audio_yts("https://yts.mx/movies/x", None))
 
     # ---------- TorrentGalaxy ----------
     def test_torrentgalaxy_parses_mediainfo_block(self):
         from unittest.mock import patch
         html = "<html><body><pre>\nAudio: French AC3 / German AC3 / English AAC\n</pre></body></html>"
-        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse(html)):
-            found = sub_fetcher._scrape_audio_torrentgalaxy("https://torrentgalaxy.to/torrent/77/abc/")
+        with patch.object(hal.urllib.request, "urlopen", return_value=_MockResponse(html)):
+            found = hal._scrape_audio_torrentgalaxy("https://torrentgalaxy.to/torrent/77/abc/")
         self.assertEqual(found, {"FRA", "GER", "ENG"})
 
     def test_torrentgalaxy_no_mediainfo_returns_none(self):
         from unittest.mock import patch
         html = "<html><body>just a generic description</body></html>"
-        with patch.object(sub_fetcher.urllib.request, "urlopen", return_value=_MockResponse(html)):
-            self.assertIsNone(sub_fetcher._scrape_audio_torrentgalaxy("https://tgx.rs/torrent/1/y/"))
+        with patch.object(hal.urllib.request, "urlopen", return_value=_MockResponse(html)):
+            self.assertIsNone(hal._scrape_audio_torrentgalaxy("https://tgx.rs/torrent/1/y/"))
 
     # ---------- Dispatcher routing ----------
     def test_dispatcher_routes_to_tpb(self):
         from unittest.mock import patch, MagicMock
         rel = {"infoUrl": "https://thepiratebay.org/description.php?id=1"}
-        with patch.object(sub_fetcher, "_scrape_audio_tpb", return_value={"ITA"}) as m_tpb, \
-             patch.object(sub_fetcher, "_scrape_audio_1337x") as m_l3, \
-             patch.object(sub_fetcher, "_scrape_audio_yts") as m_yts, \
-             patch.object(sub_fetcher, "_scrape_audio_torrentgalaxy") as m_tgx, \
-             patch.object(sub_fetcher, "_scrape_audio_generic", return_value=None) as m_gen:
-            result = sub_fetcher.scrape_release_audio_languages(rel)
+        with patch.object(hal, "_scrape_audio_tpb", return_value={"ITA"}) as m_tpb, \
+             patch.object(hal, "_scrape_audio_1337x") as m_l3, \
+             patch.object(hal, "_scrape_audio_yts") as m_yts, \
+             patch.object(hal, "_scrape_audio_torrentgalaxy") as m_tgx, \
+             patch.object(hal, "_scrape_audio_generic", return_value=None) as m_gen:
+            result = hal.scrape_release_audio_languages(rel)
         self.assertEqual(result, {"ITA"})
         m_tpb.assert_called_once()
         m_l3.assert_not_called()
@@ -3456,44 +3456,44 @@ class TestScraperExpansion(unittest.TestCase):
     def test_dispatcher_routes_to_1337x(self):
         from unittest.mock import patch
         rel = {"infoUrl": "https://1337x.to/torrent/9/abc/"}
-        with patch.object(sub_fetcher, "_scrape_audio_1337x", return_value={"ENG"}) as m:
-            result = sub_fetcher.scrape_release_audio_languages(rel)
+        with patch.object(hal, "_scrape_audio_1337x", return_value={"ENG"}) as m:
+            result = hal.scrape_release_audio_languages(rel)
         self.assertEqual(result, {"ENG"})
         m.assert_called_once()
 
     def test_dispatcher_routes_to_yts(self):
         from unittest.mock import patch
         rel = {"infoUrl": "https://yts.mx/movies/foo-2020"}
-        with patch.object(sub_fetcher, "_scrape_audio_yts", return_value={"ENG"}) as m:
-            result = sub_fetcher.scrape_release_audio_languages(rel)
+        with patch.object(hal, "_scrape_audio_yts", return_value={"ENG"}) as m:
+            result = hal.scrape_release_audio_languages(rel)
         self.assertEqual(result, {"ENG"})
         m.assert_called_once()
 
     def test_dispatcher_routes_to_torrentgalaxy(self):
         from unittest.mock import patch
         rel = {"infoUrl": "https://torrentgalaxy.to/torrent/9/abc/"}
-        with patch.object(sub_fetcher, "_scrape_audio_torrentgalaxy", return_value={"FRA"}) as m:
-            result = sub_fetcher.scrape_release_audio_languages(rel)
+        with patch.object(hal, "_scrape_audio_torrentgalaxy", return_value={"FRA"}) as m:
+            result = hal.scrape_release_audio_languages(rel)
         self.assertEqual(result, {"FRA"})
         m.assert_called_once()
 
     def test_dispatcher_falls_back_to_generic_for_unknown_host(self):
         from unittest.mock import patch
         rel = {"infoUrl": "https://random-tracker.example/show/1"}
-        with patch.object(sub_fetcher, "_scrape_audio_generic", return_value={"ITA"}) as m:
-            result = sub_fetcher.scrape_release_audio_languages(rel)
+        with patch.object(hal, "_scrape_audio_generic", return_value={"ITA"}) as m:
+            result = hal.scrape_release_audio_languages(rel)
         self.assertEqual(result, {"ITA"})
         m.assert_called_once()
 
     def test_dispatcher_returns_none_when_generic_returns_none(self):
         from unittest.mock import patch
         rel = {"infoUrl": "https://random-tracker.example/show/1"}
-        with patch.object(sub_fetcher, "_scrape_audio_generic", return_value=None):
-            self.assertIsNone(sub_fetcher.scrape_release_audio_languages(rel))
+        with patch.object(hal, "_scrape_audio_generic", return_value=None):
+            self.assertIsNone(hal.scrape_release_audio_languages(rel))
 
     def test_dispatcher_with_no_info_url_returns_none(self):
-        self.assertIsNone(sub_fetcher.scrape_release_audio_languages({"infoUrl": ""}))
-        self.assertIsNone(sub_fetcher.scrape_release_audio_languages({}))
+        self.assertIsNone(hal.scrape_release_audio_languages({"infoUrl": ""}))
+        self.assertIsNone(hal.scrape_release_audio_languages({}))
 
 
 class TestPersistentAudioCache(unittest.TestCase):
@@ -3501,20 +3501,20 @@ class TestPersistentAudioCache(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_file = sub_fetcher.AUDIO_CACHE_FILE
-        sub_fetcher.AUDIO_CACHE_FILE = os.path.join(self.tmpdir, "release_audio_cache.json")
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
-        sub_fetcher._audio_cache_dirty_count = 0
+        self._orig_file = hal.AUDIO_CACHE_FILE
+        hal.AUDIO_CACHE_FILE = os.path.join(self.tmpdir, "release_audio_cache.json")
+        hal._AUDIO_SCRAPE_CACHE.clear()
+        hal._audio_cache_dirty_count = 0
 
     def tearDown(self):
-        sub_fetcher.AUDIO_CACHE_FILE = self._orig_file
-        sub_fetcher._AUDIO_SCRAPE_CACHE.clear()
+        hal.AUDIO_CACHE_FILE = self._orig_file
+        hal._AUDIO_SCRAPE_CACHE.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_roundtrip_preserves_sets_and_nones(self):
         cache = {"h1": {"ITA", "ENG"}, "h2": None, "h3": set()}
-        sub_fetcher.save_release_audio_cache(cache)
-        loaded = sub_fetcher.load_release_audio_cache()
+        hal.save_release_audio_cache(cache)
+        loaded = hal.load_release_audio_cache()
         self.assertEqual(loaded.get("h1"), {"ITA", "ENG"})
         self.assertIsNone(loaded.get("h2"))
         # Empty set is preserved as empty set.
@@ -3529,67 +3529,67 @@ class TestPersistentAudioCache(unittest.TestCase):
             "h_fresh": {"audio": ["ITA"], "ts": fresh},
             "h_stale": {"audio": ["FRA"], "ts": ancient},
         }
-        with open(sub_fetcher.AUDIO_CACHE_FILE, "w") as f:
+        with open(hal.AUDIO_CACHE_FILE, "w") as f:
             json.dump(payload, f)
-        loaded = sub_fetcher.load_release_audio_cache()
+        loaded = hal.load_release_audio_cache()
         self.assertIn("h_fresh", loaded)
         self.assertNotIn("h_stale", loaded)
 
     def test_load_missing_file_returns_empty(self):
-        self.assertEqual(sub_fetcher.load_release_audio_cache(), {})
+        self.assertEqual(hal.load_release_audio_cache(), {})
 
     def test_load_corrupt_file_returns_empty(self):
-        with open(sub_fetcher.AUDIO_CACHE_FILE, "w") as f:
+        with open(hal.AUDIO_CACHE_FILE, "w") as f:
             f.write("this is not json")
-        self.assertEqual(sub_fetcher.load_release_audio_cache(), {})
+        self.assertEqual(hal.load_release_audio_cache(), {})
 
     def test_get_release_audio_languages_in_process_hit_skips_scrape(self):
         from unittest.mock import patch
         rel = {"infoHash": "h-hit"}
-        sub_fetcher._AUDIO_SCRAPE_CACHE["h-hit"] = {"ITA"}
-        with patch.object(sub_fetcher, "scrape_release_audio_languages") as m:
-            result = sub_fetcher.get_release_audio_languages(rel)
+        hal._AUDIO_SCRAPE_CACHE["h-hit"] = {"ITA"}
+        with patch.object(hal, "scrape_release_audio_languages") as m:
+            result = hal.get_release_audio_languages(rel)
         self.assertEqual(result, {"ITA"})
         m.assert_not_called()
 
     def test_get_release_audio_languages_persistent_hit_skips_scrape(self):
         from unittest.mock import patch
         rel = {"infoHash": "h-persist"}
-        sub_fetcher.save_release_audio_cache({"h-persist": {"ENG", "FRA"}})
-        with patch.object(sub_fetcher, "scrape_release_audio_languages") as m:
-            result = sub_fetcher.get_release_audio_languages(rel)
+        hal.save_release_audio_cache({"h-persist": {"ENG", "FRA"}})
+        with patch.object(hal, "scrape_release_audio_languages") as m:
+            result = hal.get_release_audio_languages(rel)
         self.assertEqual(result, {"ENG", "FRA"})
         m.assert_not_called()
         # Persistent hit must populate the in-process layer too.
-        self.assertEqual(sub_fetcher._AUDIO_SCRAPE_CACHE.get("h-persist"), {"ENG", "FRA"})
+        self.assertEqual(hal._AUDIO_SCRAPE_CACHE.get("h-persist"), {"ENG", "FRA"})
 
     def test_get_release_audio_languages_miss_calls_scrape_and_persists(self):
         from unittest.mock import patch
         rel = {"infoHash": "h-miss"}
-        with patch.object(sub_fetcher, "scrape_release_audio_languages", return_value={"ITA"}) as m:
-            result = sub_fetcher.get_release_audio_languages(rel)
+        with patch.object(hal, "scrape_release_audio_languages", return_value={"ITA"}) as m:
+            result = hal.get_release_audio_languages(rel)
         self.assertEqual(result, {"ITA"})
         m.assert_called_once()
         # In-process layer populated.
-        self.assertEqual(sub_fetcher._AUDIO_SCRAPE_CACHE.get("h-miss"), {"ITA"})
+        self.assertEqual(hal._AUDIO_SCRAPE_CACHE.get("h-miss"), {"ITA"})
         # Persistent layer populated.
-        persisted = sub_fetcher.load_release_audio_cache()
+        persisted = hal.load_release_audio_cache()
         self.assertEqual(persisted.get("h-miss"), {"ITA"})
 
     def test_get_release_audio_languages_failure_persists_as_none(self):
         from unittest.mock import patch
         rel = {"infoHash": "h-fail"}
-        with patch.object(sub_fetcher, "scrape_release_audio_languages", return_value=None):
-            result = sub_fetcher.get_release_audio_languages(rel)
+        with patch.object(hal, "scrape_release_audio_languages", return_value=None):
+            result = hal.get_release_audio_languages(rel)
         self.assertIsNone(result)
-        persisted = sub_fetcher.load_release_audio_cache()
+        persisted = hal.load_release_audio_cache()
         self.assertIn("h-fail", persisted)
         self.assertIsNone(persisted["h-fail"])
 
     def test_save_swallows_io_errors(self):
         # Point to an unwritable path; save() must not raise.
-        sub_fetcher.AUDIO_CACHE_FILE = "/this/path/does/not/exist/cache.json"
-        sub_fetcher.save_release_audio_cache({"h": {"ENG"}})  # no assertion: just must not raise
+        hal.AUDIO_CACHE_FILE = "/this/path/does/not/exist/cache.json"
+        hal.save_release_audio_cache({"h": {"ENG"}})  # no assertion: just must not raise
 
 
 # =============================================================================
@@ -3598,102 +3598,102 @@ class TestPersistentAudioCache(unittest.TestCase):
 
 class TestCercaQueryParsing(unittest.TestCase):
     def test_title_only(self):
-        title, year = sub_fetcher._parse_cerca_query("Il Ciclone")
+        title, year = hal._parse_cerca_query("Il Ciclone")
         self.assertEqual(title, "Il Ciclone")
         self.assertIsNone(year)
 
     def test_title_with_trailing_year(self):
-        title, year = sub_fetcher._parse_cerca_query("Il Ciclone 1996")
+        title, year = hal._parse_cerca_query("Il Ciclone 1996")
         self.assertEqual(title, "Il Ciclone")
         self.assertEqual(year, 1996)
 
     def test_title_with_paren_year(self):
-        title, year = sub_fetcher._parse_cerca_query("Il Ciclone (1996)")
+        title, year = hal._parse_cerca_query("Il Ciclone (1996)")
         self.assertEqual(title, "Il Ciclone")
         self.assertEqual(year, 1996)
 
     def test_empty_arg_returns_empty(self):
-        title, year = sub_fetcher._parse_cerca_query("")
+        title, year = hal._parse_cerca_query("")
         self.assertEqual(title, "")
         self.assertIsNone(year)
 
     def test_three_digit_token_not_year(self):
-        title, year = sub_fetcher._parse_cerca_query("Movie 123")
+        title, year = hal._parse_cerca_query("Movie 123")
         self.assertEqual(title, "Movie 123")
         self.assertIsNone(year)
 
 
 class TestSafeFilmDirname(unittest.TestCase):
     def test_basic(self):
-        self.assertEqual(sub_fetcher._safe_film_dirname("Il Ciclone", 1996), "Il Ciclone (1996)")
+        self.assertEqual(hal._safe_film_dirname("Il Ciclone", 1996), "Il Ciclone (1996)")
 
     def test_no_year(self):
-        self.assertEqual(sub_fetcher._safe_film_dirname("Foo", None), "Foo")
+        self.assertEqual(hal._safe_film_dirname("Foo", None), "Foo")
 
     def test_strips_path_separators(self):
-        self.assertEqual(sub_fetcher._safe_film_dirname("Foo/Bar:Baz", 2020), "FooBarBaz (2020)")
+        self.assertEqual(hal._safe_film_dirname("Foo/Bar:Baz", 2020), "FooBarBaz (2020)")
 
     def test_blank_falls_back(self):
-        self.assertEqual(sub_fetcher._safe_film_dirname("///", 2020), "Unknown (2020)")
+        self.assertEqual(hal._safe_film_dirname("///", 2020), "Unknown (2020)")
 
     def test_keeps_accents(self):
-        self.assertEqual(sub_fetcher._safe_film_dirname("Amélie", 2001), "Amélie (2001)")
+        self.assertEqual(hal._safe_film_dirname("Amélie", 2001), "Amélie (2001)")
 
 
 class TestParseDurationToSeconds(unittest.TestCase):
     def test_int(self):
-        self.assertEqual(sub_fetcher._parse_duration_to_seconds(120), 120)
+        self.assertEqual(hal._parse_duration_to_seconds(120), 120)
 
     def test_string_digits(self):
-        self.assertEqual(sub_fetcher._parse_duration_to_seconds("90"), 90)
+        self.assertEqual(hal._parse_duration_to_seconds("90"), 90)
 
     def test_mm_ss(self):
-        self.assertEqual(sub_fetcher._parse_duration_to_seconds("1:30"), 90)
+        self.assertEqual(hal._parse_duration_to_seconds("1:30"), 90)
 
     def test_hh_mm_ss(self):
-        self.assertEqual(sub_fetcher._parse_duration_to_seconds("1:30:00"), 5400)
+        self.assertEqual(hal._parse_duration_to_seconds("1:30:00"), 5400)
 
     def test_invalid(self):
-        self.assertIsNone(sub_fetcher._parse_duration_to_seconds("nope"))
+        self.assertIsNone(hal._parse_duration_to_seconds("nope"))
 
 
 class TestFormatDuration(unittest.TestCase):
     def test_minutes(self):
-        self.assertEqual(sub_fetcher._format_duration(47 * 60), "47m")
+        self.assertEqual(hal._format_duration(47 * 60), "47m")
 
     def test_hours_and_minutes(self):
-        self.assertEqual(sub_fetcher._format_duration(95 * 60), "1h35m")
+        self.assertEqual(hal._format_duration(95 * 60), "1h35m")
 
     def test_exact_hours(self):
-        self.assertEqual(sub_fetcher._format_duration(2 * 3600), "2h")
+        self.assertEqual(hal._format_duration(2 * 3600), "2h")
 
     def test_none(self):
-        self.assertEqual(sub_fetcher._format_duration(None), "?")
+        self.assertEqual(hal._format_duration(None), "?")
 
 
 class TestPickBestArchiveFile(unittest.TestCase):
     def test_prefers_mp4_over_avi(self):
-        result = sub_fetcher._pick_best_archive_file([
+        result = hal._pick_best_archive_file([
             {"name": "movie.avi", "size": "100"},
             {"name": "movie.mp4", "size": "50"},
         ])
         self.assertEqual(result["name"], "movie.mp4")
 
     def test_skips_trailer(self):
-        result = sub_fetcher._pick_best_archive_file([
+        result = hal._pick_best_archive_file([
             {"name": "trailer.mp4", "size": "10"},
             {"name": "main.mp4", "size": "100"},
         ])
         self.assertEqual(result["name"], "main.mp4")
 
     def test_no_video_returns_none(self):
-        result = sub_fetcher._pick_best_archive_file([
+        result = hal._pick_best_archive_file([
             {"name": "info.txt", "size": "5"},
         ])
         self.assertIsNone(result)
 
     def test_empty_list_returns_none(self):
-        self.assertIsNone(sub_fetcher._pick_best_archive_file([]))
+        self.assertIsNone(hal._pick_best_archive_file([]))
 
 
 class TestSearchArchiveOrg(unittest.TestCase):
@@ -3729,7 +3729,7 @@ class TestSearchArchiveOrg(unittest.TestCase):
         meta1 = {"files": [{"name": "ilciclone.mp4", "size": "500000000", "format": "h264"}]}
         meta2 = {"files": [{"name": "ilciclone_hd.mkv", "size": "1500000000", "format": "h264"}]}
         opener = self._make_opener([search_payload, meta1, meta2])
-        results = sub_fetcher.search_archive_org("Il Ciclone", year=1996, limit=10, opener=opener)
+        results = hal.search_archive_org("Il Ciclone", year=1996, limit=10, opener=opener)
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["identifier"], "movie1")
         self.assertEqual(results[0]["source"], "archive")
@@ -3738,13 +3738,13 @@ class TestSearchArchiveOrg(unittest.TestCase):
 
     def test_no_results_returns_empty(self):
         opener = self._make_opener([{"response": {"docs": []}}])
-        results = sub_fetcher.search_archive_org("Nonexistent Movie", opener=opener)
+        results = hal.search_archive_org("Nonexistent Movie", opener=opener)
         self.assertEqual(results, [])
 
     def test_http_error_returns_empty(self):
         def boom(url, timeout=None):
             raise OSError("connection refused")
-        results = sub_fetcher.search_archive_org("Anything", opener=boom)
+        results = hal.search_archive_org("Anything", opener=boom)
         self.assertEqual(results, [])
 
     def test_skips_items_without_video_files(self):
@@ -3753,7 +3753,7 @@ class TestSearchArchiveOrg(unittest.TestCase):
         ]}}
         meta = {"files": [{"name": "readme.txt", "size": "100"}]}
         opener = self._make_opener([search_payload, meta])
-        results = sub_fetcher.search_archive_org("Foo", opener=opener)
+        results = hal.search_archive_org("Foo", opener=opener)
         self.assertEqual(results, [])
 
 
@@ -3777,7 +3777,7 @@ class TestSearchYoutube(unittest.TestCase):
             "Il Ciclone parte 1|def456|5700|Mario\n"
         )
         runner = self._make_runner(stdout=stdout)
-        results = sub_fetcher.search_youtube("Il Ciclone Pieraccioni", limit=8, runner=runner)
+        results = hal.search_youtube("Il Ciclone Pieraccioni", limit=8, runner=runner)
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["video_id"], "abc123")
         self.assertEqual(results[0]["duration_sec"], 5820)
@@ -3787,32 +3787,32 @@ class TestSearchYoutube(unittest.TestCase):
 
     def test_yt_dlp_missing_returns_empty(self):
         runner = self._make_runner(raises=FileNotFoundError())
-        results = sub_fetcher.search_youtube("anything", runner=runner)
+        results = hal.search_youtube("anything", runner=runner)
         self.assertEqual(results, [])
 
     def test_filters_short_clips(self):
         # 30 minutes — too short for a movie
         stdout = "Clip|xxx|1800|chan\n"
         runner = self._make_runner(stdout=stdout)
-        results = sub_fetcher.search_youtube("Foo", runner=runner)
+        results = hal.search_youtube("Foo", runner=runner)
         self.assertEqual(results, [])
 
     def test_filters_long_streams(self):
         # 5 hours — too long
         stdout = "Stream|xxx|18000|chan\n"
         runner = self._make_runner(stdout=stdout)
-        results = sub_fetcher.search_youtube("Foo", runner=runner)
+        results = hal.search_youtube("Foo", runner=runner)
         self.assertEqual(results, [])
 
     def test_non_zero_returncode_returns_empty(self):
         runner = self._make_runner(stdout="", stderr="boom", returncode=1)
-        results = sub_fetcher.search_youtube("Foo", runner=runner)
+        results = hal.search_youtube("Foo", runner=runner)
         self.assertEqual(results, [])
 
     def test_skips_lines_with_na_duration(self):
         stdout = "X|abc|NA|chan\nValid|def|5700|chan2\n"
         runner = self._make_runner(stdout=stdout)
-        results = sub_fetcher.search_youtube("Foo", runner=runner)
+        results = hal.search_youtube("Foo", runner=runner)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["video_id"], "def")
 
@@ -3838,7 +3838,7 @@ class TestRemuxToMkv(unittest.TestCase):
                 stderr = ""
                 returncode = 0
             return P()
-        path = sub_fetcher.remux_to_mkv(self.src, self.dest, runner=runner)
+        path = hal.remux_to_mkv(self.src, self.dest, runner=runner)
         self.assertEqual(path, self.dest)
         self.assertTrue(os.path.exists(self.dest))
         self.assertFalse(os.path.exists(self.src))
@@ -3850,13 +3850,13 @@ class TestRemuxToMkv(unittest.TestCase):
                 stderr = "ffmpeg boom"
                 returncode = 1
             return P()
-        with self.assertRaises(sub_fetcher.CercaDownloadError):
-            sub_fetcher.remux_to_mkv(self.src, self.dest, runner=runner)
+        with self.assertRaises(hal.CercaDownloadError):
+            hal.remux_to_mkv(self.src, self.dest, runner=runner)
         self.assertTrue(os.path.exists(self.src))
 
     def test_missing_source_raises(self):
-        with self.assertRaises(sub_fetcher.CercaDownloadError):
-            sub_fetcher.remux_to_mkv(os.path.join(self.tmpdir, "ghost.webm"), self.dest)
+        with self.assertRaises(hal.CercaDownloadError):
+            hal.remux_to_mkv(os.path.join(self.tmpdir, "ghost.webm"), self.dest)
 
 
 class TestInstallToLibrary(unittest.TestCase):
@@ -3871,7 +3871,7 @@ class TestInstallToLibrary(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_moves_file_and_creates_folder(self):
-        final = sub_fetcher.install_to_library(
+        final = hal.install_to_library(
             self.src, "Il Ciclone", 1996, library_dir=self.library, radarr_scan=False,
         )
         self.assertTrue(os.path.exists(final))
@@ -3881,52 +3881,52 @@ class TestInstallToLibrary(unittest.TestCase):
 
     def test_calls_radarr_scan_when_enabled(self):
         from unittest.mock import patch, MagicMock
-        with patch.object(sub_fetcher, "RadarrClient") as mock_cls:
+        with patch.object(hal, "RadarrClient") as mock_cls:
             client_instance = MagicMock()
             mock_cls.return_value = client_instance
-            sub_fetcher.install_to_library(
+            hal.install_to_library(
                 self.src, "Il Ciclone", 1996, library_dir=self.library, radarr_scan=True,
             )
             client_instance.trigger_downloaded_movies_scan.assert_called_once()
 
     def test_missing_source_raises(self):
-        with self.assertRaises(sub_fetcher.CercaDownloadError):
-            sub_fetcher.install_to_library(
+        with self.assertRaises(hal.CercaDownloadError):
+            hal.install_to_library(
                 "/nonexistent/file.mkv", "Foo", 2020, library_dir=self.library, radarr_scan=False,
             )
 
 
 class TestCercaCommandDispatcher(unittest.TestCase):
     def test_cerca_canonical_resolves(self):
-        spec = sub_fetcher._find_command("/cerca")
+        spec = hal._find_command("/cerca")
         self.assertIsNotNone(spec)
         self.assertEqual(spec["canonical"], "/cerca")
 
     def test_cerca_aliases_resolve(self):
         for alias in ["/search", "/find"]:
-            spec = sub_fetcher._find_command(alias)
+            spec = hal._find_command(alias)
             self.assertIsNotNone(spec, f"alias {alias} should resolve to /cerca")
             self.assertEqual(spec["canonical"], "/cerca")
 
     def test_sub_canonical_resolves(self):
-        spec = sub_fetcher._find_command("/sub")
+        spec = hal._find_command("/sub")
         self.assertIsNotNone(spec)
         self.assertEqual(spec["canonical"], "/sub")
 
     def test_cmd_cerca_empty_arg_shows_usage(self):
         from unittest.mock import patch
         sent = []
-        with patch.object(sub_fetcher, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
-            sub_fetcher._cmd_cerca("", {}, set())
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
+            hal._cmd_cerca("", {}, set())
         self.assertTrue(sent)
         self.assertIn("Usa", sent[0][0])
 
     def test_cmd_cerca_enqueues_search(self):
         from unittest.mock import patch, MagicMock
-        with patch.object(sub_fetcher, "tg_send", return_value={"ok": True, "result": {"message_id": 42}}), \
-             patch.object(sub_fetcher, "download_queue") as mock_queue, \
-             patch.object(sub_fetcher, "queue_position", return_value=0):
-            sub_fetcher._cmd_cerca("Il Ciclone 1996", {}, set())
+        with patch.object(hal, "tg_send", return_value={"ok": True, "result": {"message_id": 42}}), \
+             patch.object(hal, "download_queue") as mock_queue, \
+             patch.object(hal, "queue_position", return_value=0):
+            hal._cmd_cerca("Il Ciclone 1996", {}, set())
             mock_queue.put.assert_called_once()
             job = mock_queue.put.call_args[0][0]
             self.assertEqual(job["type"], "cerca_search")
@@ -3940,16 +3940,16 @@ class TestRenderCercaConfirm(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig = sub_fetcher.REQUESTS_FILE
-        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+        self._orig = hal.REQUESTS_FILE
+        hal.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
 
     def tearDown(self):
-        sub_fetcher.REQUESTS_FILE = self._orig
+        hal.REQUESTS_FILE = self._orig
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_archive_result_renders_keyboard(self):
         from unittest.mock import patch
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         rs["pending_cerca"]["film:abc12345"] = {
             "title": "Il Ciclone",
             "year": 1996,
@@ -3959,11 +3959,11 @@ class TestRenderCercaConfirm(unittest.TestCase):
                 "file_name": "movie.mp4", "url": "https://archive.org/x", "uploader": None,
             }],
         }
-        sub_fetcher.save_requests(rs)
+        hal.save_requests(rs)
         edits = []
-        with patch.object(sub_fetcher, "tg_edit_message",
+        with patch.object(hal, "tg_edit_message",
                           side_effect=lambda mid, body, reply_markup=None: edits.append((body, reply_markup))):
-            ok = sub_fetcher._render_cerca_confirm("abc12345", 0, progress_msg_id=10)
+            ok = hal._render_cerca_confirm("abc12345", 0, progress_msg_id=10)
         self.assertTrue(ok)
         self.assertTrue(edits)
         body, markup = edits[0]
@@ -3974,7 +3974,7 @@ class TestRenderCercaConfirm(unittest.TestCase):
 
     def test_youtube_result_renders_with_low_quality_warning(self):
         from unittest.mock import patch
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         rs["pending_cerca"]["film:xyz98765"] = {
             "title": "Il Ciclone",
             "year": 1996,
@@ -3984,11 +3984,11 @@ class TestRenderCercaConfirm(unittest.TestCase):
                 "url": "https://www.youtube.com/watch?v=abc", "quality_hint": "480p",
             }],
         }
-        sub_fetcher.save_requests(rs)
+        hal.save_requests(rs)
         edits = []
-        with patch.object(sub_fetcher, "tg_edit_message",
+        with patch.object(hal, "tg_edit_message",
                           side_effect=lambda mid, body, reply_markup=None: edits.append((body, reply_markup))):
-            ok = sub_fetcher._render_cerca_confirm("xyz98765", 0, progress_msg_id=10)
+            ok = hal._render_cerca_confirm("xyz98765", 0, progress_msg_id=10)
         self.assertTrue(ok)
         body, _ = edits[0]
         self.assertIn("480p", body)
@@ -3996,15 +3996,15 @@ class TestRenderCercaConfirm(unittest.TestCase):
 
     def test_expired_session_returns_false(self):
         from unittest.mock import patch
-        with patch.object(sub_fetcher, "tg_edit_message") as m:
-            ok = sub_fetcher._render_cerca_confirm("ghost00", 0, progress_msg_id=10)
+        with patch.object(hal, "tg_edit_message") as m:
+            ok = hal._render_cerca_confirm("ghost00", 0, progress_msg_id=10)
         self.assertFalse(ok)
         m.assert_not_called()
 
 
 class TestFormatCercaButton(unittest.TestCase):
     def test_archive_label(self):
-        label = sub_fetcher._format_cerca_button({
+        label = hal._format_cerca_button({
             "source": "archive", "identifier": "movie1", "size": 1024 * 1024 * 1024,
             "duration_sec": 5700,
         })
@@ -4012,7 +4012,7 @@ class TestFormatCercaButton(unittest.TestCase):
         self.assertIn("1h35m", label)
 
     def test_youtube_high_quality_label(self):
-        label = sub_fetcher._format_cerca_button({
+        label = hal._format_cerca_button({
             "source": "youtube", "video_id": "abc", "title": "Il Ciclone 1080p",
             "duration_sec": 5700, "quality_hint": "1080p",
         })
@@ -4021,7 +4021,7 @@ class TestFormatCercaButton(unittest.TestCase):
         self.assertNotIn("⚠️", label)
 
     def test_youtube_low_quality_gets_warning_marker(self):
-        label = sub_fetcher._format_cerca_button({
+        label = hal._format_cerca_button({
             "source": "youtube", "video_id": "abc", "title": "Il Ciclone 480p",
             "duration_sec": 5700, "quality_hint": "480p",
         })
@@ -4040,54 +4040,54 @@ class TestExtractResolutionFromArchiveMetadata(unittest.TestCase):
     only a bitrate. Cover all four paths."""
 
     def test_explicit_height_picks_1080p(self):
-        label = sub_fetcher._extract_resolution_from_archive_metadata(
+        label = hal._extract_resolution_from_archive_metadata(
             {"name": "x.mp4", "height": 1080, "width": 1920}
         )
         self.assertEqual(label, "1080p")
 
     def test_explicit_height_picks_2160p(self):
-        label = sub_fetcher._extract_resolution_from_archive_metadata(
+        label = hal._extract_resolution_from_archive_metadata(
             {"name": "x.mp4", "height": 2160}
         )
         self.assertEqual(label, "2160p")
 
     def test_height_below_lowest_bucket_returns_none(self):
-        label = sub_fetcher._extract_resolution_from_archive_metadata(
+        label = hal._extract_resolution_from_archive_metadata(
             {"name": "x.mp4", "height": 240}
         )
         self.assertIsNone(label)
 
     def test_embedded_dimensions_in_format(self):
-        label = sub_fetcher._extract_resolution_from_archive_metadata(
+        label = hal._extract_resolution_from_archive_metadata(
             {"name": "x.mp4", "format": "h.264 1280x720"}
         )
         self.assertEqual(label, "720p")
 
     def test_keyword_fallback_in_name(self):
-        label = sub_fetcher._extract_resolution_from_archive_metadata(
+        label = hal._extract_resolution_from_archive_metadata(
             {"name": "movie.1080p.mp4", "format": "h264"}
         )
         self.assertEqual(label, "1080p")
 
     def test_bitrate_fallback_high(self):
-        label = sub_fetcher._extract_resolution_from_archive_metadata(
+        label = hal._extract_resolution_from_archive_metadata(
             {"name": "x.mp4", "bitrate": 6000}
         )
         self.assertEqual(label, "1080p")
 
     def test_bitrate_fallback_medium(self):
-        label = sub_fetcher._extract_resolution_from_archive_metadata(
+        label = hal._extract_resolution_from_archive_metadata(
             {"name": "x.mp4", "bitrate": 2500}
         )
         self.assertEqual(label, "720p")
 
     def test_no_metadata_returns_none(self):
-        label = sub_fetcher._extract_resolution_from_archive_metadata({"name": "x.mp4"})
+        label = hal._extract_resolution_from_archive_metadata({"name": "x.mp4"})
         self.assertIsNone(label)
 
     def test_non_dict_returns_none(self):
-        self.assertIsNone(sub_fetcher._extract_resolution_from_archive_metadata(None))
-        self.assertIsNone(sub_fetcher._extract_resolution_from_archive_metadata("string"))
+        self.assertIsNone(hal._extract_resolution_from_archive_metadata(None))
+        self.assertIsNone(hal._extract_resolution_from_archive_metadata("string"))
 
 
 class TestEnrichYoutubeResolution(unittest.TestCase):
@@ -4097,7 +4097,7 @@ class TestEnrichYoutubeResolution(unittest.TestCase):
     def setUp(self):
         # The shared `_YOUTUBE_RESOLUTION_CACHE` would otherwise carry
         # results between cases and make tests order-dependent.
-        sub_fetcher._YOUTUBE_RESOLUTION_CACHE.clear()
+        hal._YOUTUBE_RESOLUTION_CACHE.clear()
 
     def _runner(self, stdout="", returncode=0):
         def runner(cmd, capture_output=True, text=True, timeout=None):
@@ -4111,14 +4111,14 @@ class TestEnrichYoutubeResolution(unittest.TestCase):
 
     def test_parses_height_and_attaches_label(self):
         runner = self._runner(stdout="1080|22|524288000\n")
-        payload = sub_fetcher._enrich_youtube_resolution("abc123", runner=runner)
+        payload = hal._enrich_youtube_resolution("abc123", runner=runner)
         self.assertEqual(payload["height"], 1080)
         self.assertEqual(payload["format_id"], "22")
         self.assertEqual(payload["filesize_approx"], 524288000)
 
     def test_yt_dlp_failure_returns_none(self):
         runner = self._runner(returncode=1)
-        payload = sub_fetcher._enrich_youtube_resolution("abc123", runner=runner)
+        payload = hal._enrich_youtube_resolution("abc123", runner=runner)
         self.assertIsNone(payload)
 
     def test_enrich_pipeline_sets_resolution_label(self):
@@ -4127,7 +4127,7 @@ class TestEnrichYoutubeResolution(unittest.TestCase):
             {"source": "youtube", "video_id": "bbb", "title": "Movie", "duration_sec": 5400},
         ]
         runner = self._runner(stdout="720|18|209715200\n")
-        sub_fetcher._enrich_youtube_results(results, runner=runner, max_probe=2, max_workers=1)
+        hal._enrich_youtube_results(results, runner=runner, max_probe=2, max_workers=1)
         self.assertEqual(results[0]["resolution_label"], "720p")
         self.assertEqual(results[1]["resolution_label"], "720p")
 
@@ -4142,7 +4142,7 @@ class TestScoreResult(unittest.TestCase):
             "resolution_label": "1080p", "size": 900 * 1024 * 1024,
             "duration_sec": 5400,
         }
-        score = sub_fetcher.score_result(result, tmdb_runtime_min=96)
+        score = hal.score_result(result, tmdb_runtime_min=96)
         self.assertGreater(score, 50)
 
     def test_rescore_penalty_keeps_positive_but_lower_than_clean(self):
@@ -4158,8 +4158,8 @@ class TestScoreResult(unittest.TestCase):
             "resolution_label": "1080p", "size": 900 * 1024 * 1024,
             "duration_sec": 5400,
         }
-        rescored_score = sub_fetcher.score_result(rescored, tmdb_runtime_min=96)
-        clean_score = sub_fetcher.score_result(clean, tmdb_runtime_min=96)
+        rescored_score = hal.score_result(rescored, tmdb_runtime_min=96)
+        clean_score = hal.score_result(clean, tmdb_runtime_min=96)
         self.assertGreater(clean_score, rescored_score)
         self.assertLess(rescored_score, 0)
 
@@ -4168,16 +4168,16 @@ class TestScoreResult(unittest.TestCase):
             "source": "youtube", "title": "Night Of The Living Dead — Trailer",
             "video_id": "xx", "duration_sec": 7200,
         }
-        score = sub_fetcher.score_result(trailer)
-        self.assertLess(score, sub_fetcher._CERCA_EXCLUDE_SCORE_THRESHOLD)
+        score = hal.score_result(trailer)
+        self.assertLess(score, hal._CERCA_EXCLUDE_SCORE_THRESHOLD)
 
     def test_behind_the_scenes_is_excluded(self):
         bts = {
             "source": "youtube", "title": "Making Of Behind The Scenes Doc",
             "video_id": "xx", "duration_sec": 7200,
         }
-        score = sub_fetcher.score_result(bts)
-        self.assertLess(score, sub_fetcher._CERCA_EXCLUDE_SCORE_THRESHOLD)
+        score = hal.score_result(bts)
+        self.assertLess(score, hal._CERCA_EXCLUDE_SCORE_THRESHOLD)
 
     def test_archive_scores_higher_than_youtube_all_else_equal(self):
         a = {"source": "archive", "title": "Movie", "identifier": "movie",
@@ -4186,8 +4186,8 @@ class TestScoreResult(unittest.TestCase):
         y = {"source": "youtube", "title": "Movie", "video_id": "x",
              "resolution_label": "720p", "duration_sec": 5400}
         self.assertGreater(
-            sub_fetcher.score_result(a, tmdb_runtime_min=90),
-            sub_fetcher.score_result(y, tmdb_runtime_min=90),
+            hal.score_result(a, tmdb_runtime_min=90),
+            hal.score_result(y, tmdb_runtime_min=90),
         )
 
     def test_sort_orders_clean_before_rescored(self):
@@ -4201,7 +4201,7 @@ class TestScoreResult(unittest.TestCase):
         yt = {"source": "youtube", "title": "Movie HD", "video_id": "x",
               "resolution_label": "720p", "duration_sec": 5400}
         items = [rescore, yt, clean]
-        items.sort(key=lambda r: sub_fetcher.score_result(r, tmdb_runtime_min=90), reverse=True)
+        items.sort(key=lambda r: hal.score_result(r, tmdb_runtime_min=90), reverse=True)
         self.assertEqual(items[0], clean)
         self.assertEqual(items[-1], rescore)
 
@@ -4213,9 +4213,9 @@ class TestCercaGrabIdempotency(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_req = sub_fetcher.REQUESTS_FILE
-        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
-        rs = sub_fetcher.load_requests()
+        self._orig_req = hal.REQUESTS_FILE
+        hal.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+        rs = hal.load_requests()
         rs["pending_cerca"]["film:hashAAA"] = {
             "title": "Night Of The Living Dead",
             "year": 1968,
@@ -4228,34 +4228,34 @@ class TestCercaGrabIdempotency(unittest.TestCase):
             }],
             "downloading_idx": None,
         }
-        sub_fetcher.save_requests(rs)
+        hal.save_requests(rs)
 
     def tearDown(self):
-        sub_fetcher.REQUESTS_FILE = self._orig_req
+        hal.REQUESTS_FILE = self._orig_req
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_first_grab_sets_downloading_idx(self):
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         entry = rs["pending_cerca"]["film:hashAAA"]
         # Simulate the guard logic of the callback handler.
         self.assertIsNone(entry.get("downloading_idx"))
         entry["downloading_idx"] = 0
-        sub_fetcher.save_requests(rs)
-        rs2 = sub_fetcher.load_requests()
+        hal.save_requests(rs)
+        rs2 = hal.load_requests()
         self.assertEqual(rs2["pending_cerca"]["film:hashAAA"]["downloading_idx"], 0)
 
     def test_release_resets_downloading_idx(self):
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         rs["pending_cerca"]["film:hashAAA"]["downloading_idx"] = 0
-        sub_fetcher.save_requests(rs)
-        sub_fetcher._release_cerca_downloading_idx("hashAAA")
-        rs2 = sub_fetcher.load_requests()
+        hal.save_requests(rs)
+        hal._release_cerca_downloading_idx("hashAAA")
+        rs2 = hal.load_requests()
         self.assertIsNone(rs2["pending_cerca"]["film:hashAAA"]["downloading_idx"])
 
     def test_release_on_missing_entry_is_noop(self):
         # Should not raise even when the entry was cleared concurrently.
-        sub_fetcher._release_cerca_downloading_idx("notARealHash")
-        rs = sub_fetcher.load_requests()
+        hal._release_cerca_downloading_idx("notARealHash")
+        rs = hal.load_requests()
         self.assertIn("film:hashAAA", rs["pending_cerca"])
 
 
@@ -4302,7 +4302,7 @@ class TestDownloadArchiveOrgRetry(unittest.TestCase):
     def test_succeeds_after_two_5xx(self):
         err = urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
         opener, _ = self._opener_factory([err, err, b"FAKEPAYLOAD"])
-        path = sub_fetcher.download_archive_org(
+        path = hal.download_archive_org(
             "https://archive.org/x", self.dest,
             opener=opener, sleep_fn=lambda s: self.sleeps.append(s),
         )
@@ -4314,8 +4314,8 @@ class TestDownloadArchiveOrgRetry(unittest.TestCase):
     def test_404_is_not_retried(self):
         err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
         opener, leftover = self._opener_factory([err, b"never used"])
-        with self.assertRaises(sub_fetcher.CercaDownloadError):
-            sub_fetcher.download_archive_org(
+        with self.assertRaises(hal.CercaDownloadError):
+            hal.download_archive_org(
                 "https://archive.org/x", self.dest,
                 opener=opener, sleep_fn=lambda s: self.sleeps.append(s),
             )
@@ -4326,8 +4326,8 @@ class TestDownloadArchiveOrgRetry(unittest.TestCase):
     def test_5xx_exhausted_raises_cerca_error(self):
         err = urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
         opener, _ = self._opener_factory([err, err, err, err])
-        with self.assertRaises(sub_fetcher.CercaDownloadError):
-            sub_fetcher.download_archive_org(
+        with self.assertRaises(hal.CercaDownloadError):
+            hal.download_archive_org(
                 "https://archive.org/x", self.dest,
                 opener=opener, sleep_fn=lambda s: self.sleeps.append(s),
             )
@@ -4343,16 +4343,16 @@ class TestCercaConfirmCardReadability(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig = sub_fetcher.REQUESTS_FILE
-        sub_fetcher.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
+        self._orig = hal.REQUESTS_FILE
+        hal.REQUESTS_FILE = os.path.join(self.tmpdir, "requests.json")
 
     def tearDown(self):
-        sub_fetcher.REQUESTS_FILE = self._orig
+        hal.REQUESTS_FILE = self._orig
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_card_uses_metadata_title_and_director(self):
         from unittest.mock import patch
-        rs = sub_fetcher.load_requests()
+        rs = hal.load_requests()
         rs["pending_cerca"]["film:abc12345"] = {
             "title": "Night of the Living Dead",
             "year": 1968,
@@ -4369,11 +4369,11 @@ class TestCercaConfirmCardReadability(unittest.TestCase):
                 "url": "https://archive.org/x",
             }],
         }
-        sub_fetcher.save_requests(rs)
+        hal.save_requests(rs)
         edits = []
-        with patch.object(sub_fetcher, "tg_edit_message",
+        with patch.object(hal, "tg_edit_message",
                           side_effect=lambda mid, body, reply_markup=None: edits.append((body, reply_markup))):
-            ok = sub_fetcher._render_cerca_confirm("abc12345", 0, progress_msg_id=11)
+            ok = hal._render_cerca_confirm("abc12345", 0, progress_msg_id=11)
         self.assertTrue(ok)
         body, _ = edits[0]
         self.assertIn("Regia: George A. Romero", body)
@@ -4393,16 +4393,16 @@ class TestFirstDirectorFromCredits(unittest.TestCase):
             {"job": "Director", "name": "George A. Romero"},
             {"job": "Writer", "name": "John Russo"},
         ]}
-        self.assertEqual(sub_fetcher._first_director_from_credits(credits), "George A. Romero")
+        self.assertEqual(hal._first_director_from_credits(credits), "George A. Romero")
 
     def test_returns_none_on_no_director(self):
         credits = {"crew": [{"job": "Producer", "name": "X"}]}
-        self.assertIsNone(sub_fetcher._first_director_from_credits(credits))
+        self.assertIsNone(hal._first_director_from_credits(credits))
 
     def test_returns_none_on_malformed_payload(self):
-        self.assertIsNone(sub_fetcher._first_director_from_credits(None))
-        self.assertIsNone(sub_fetcher._first_director_from_credits({}))
-        self.assertIsNone(sub_fetcher._first_director_from_credits({"crew": []}))
+        self.assertIsNone(hal._first_director_from_credits(None))
+        self.assertIsNone(hal._first_director_from_credits({}))
+        self.assertIsNone(hal._first_director_from_credits({"crew": []}))
 
 
 # =============================================================================
@@ -4416,7 +4416,7 @@ class TestYoutubeResolutionCache(unittest.TestCase):
 
     def setUp(self):
         # Reset the shared cache so each test starts from a clean slate.
-        sub_fetcher._YOUTUBE_RESOLUTION_CACHE.clear()
+        hal._YOUTUBE_RESOLUTION_CACHE.clear()
 
     def _runner(self, stdout, returncode=0, counter=None):
         def runner(cmd, capture_output=True, text=True, timeout=None):
@@ -4434,45 +4434,45 @@ class TestYoutubeResolutionCache(unittest.TestCase):
     def test_second_call_hits_cache_no_subprocess(self):
         calls = []
         runner = self._runner("720|22|209715200\n", counter=calls)
-        first = sub_fetcher._enrich_youtube_resolution("video_abc", runner=runner)
+        first = hal._enrich_youtube_resolution("video_abc", runner=runner)
         self.assertEqual(first["height"], 720)
         self.assertEqual(len(calls), 1)
 
         # Second call must NOT invoke the runner — proof the cache short-
         # circuits the subprocess path.
         broken_runner = self._runner("", returncode=1, counter=calls)
-        second = sub_fetcher._enrich_youtube_resolution("video_abc", runner=broken_runner)
+        second = hal._enrich_youtube_resolution("video_abc", runner=broken_runner)
         self.assertEqual(second["height"], 720)
         self.assertEqual(len(calls), 1)  # still just the first call
 
     def test_negative_result_is_cached(self):
         calls = []
         runner = self._runner("", returncode=1, counter=calls)
-        first = sub_fetcher._enrich_youtube_resolution("video_fail", runner=runner)
+        first = hal._enrich_youtube_resolution("video_fail", runner=runner)
         self.assertIsNone(first)
         self.assertEqual(len(calls), 1)
         # Second probe for the same id MUST skip the subprocess.
         second_runner = self._runner("9999|22|0\n", counter=calls)
-        second = sub_fetcher._enrich_youtube_resolution("video_fail", runner=second_runner)
+        second = hal._enrich_youtube_resolution("video_fail", runner=second_runner)
         self.assertIsNone(second)
         self.assertEqual(len(calls), 1)
 
     def test_cache_lru_evicts_oldest_when_full(self):
         # Force the cap low for this test.
-        orig_cap = sub_fetcher._YOUTUBE_RESOLUTION_CACHE_MAX
+        orig_cap = hal._YOUTUBE_RESOLUTION_CACHE_MAX
         try:
-            sub_fetcher._YOUTUBE_RESOLUTION_CACHE_MAX = 2
-            sub_fetcher._YOUTUBE_RESOLUTION_CACHE.clear()
-            sub_fetcher._youtube_resolution_cache_put("a", {"height": 1080})
-            sub_fetcher._youtube_resolution_cache_put("b", {"height": 720})
-            sub_fetcher._youtube_resolution_cache_put("c", {"height": 480})
+            hal._YOUTUBE_RESOLUTION_CACHE_MAX = 2
+            hal._YOUTUBE_RESOLUTION_CACHE.clear()
+            hal._youtube_resolution_cache_put("a", {"height": 1080})
+            hal._youtube_resolution_cache_put("b", {"height": 720})
+            hal._youtube_resolution_cache_put("c", {"height": 480})
             # 'a' should have been evicted.
-            self.assertNotIn("a", sub_fetcher._YOUTUBE_RESOLUTION_CACHE)
-            self.assertIn("b", sub_fetcher._YOUTUBE_RESOLUTION_CACHE)
-            self.assertIn("c", sub_fetcher._YOUTUBE_RESOLUTION_CACHE)
+            self.assertNotIn("a", hal._YOUTUBE_RESOLUTION_CACHE)
+            self.assertIn("b", hal._YOUTUBE_RESOLUTION_CACHE)
+            self.assertIn("c", hal._YOUTUBE_RESOLUTION_CACHE)
         finally:
-            sub_fetcher._YOUTUBE_RESOLUTION_CACHE_MAX = orig_cap
-            sub_fetcher._YOUTUBE_RESOLUTION_CACHE.clear()
+            hal._YOUTUBE_RESOLUTION_CACHE_MAX = orig_cap
+            hal._YOUTUBE_RESOLUTION_CACHE.clear()
 
 
 class TestAnsweredCallbackDedupe(unittest.TestCase):
@@ -4481,8 +4481,8 @@ class TestAnsweredCallbackDedupe(unittest.TestCase):
     fill up with bogus errors."""
 
     def setUp(self):
-        sub_fetcher._ANSWERED_CALLBACK_IDS.clear()
-        sub_fetcher._ANSWERED_CALLBACK_SET.clear()
+        hal._ANSWERED_CALLBACK_IDS.clear()
+        hal._ANSWERED_CALLBACK_SET.clear()
 
     def test_second_answer_is_silent_noop(self):
         from unittest.mock import patch
@@ -4492,10 +4492,10 @@ class TestAnsweredCallbackDedupe(unittest.TestCase):
             calls.append((method, data))
             return {"ok": True}
 
-        with patch.object(sub_fetcher, "tg_request", side_effect=fake_request):
-            sub_fetcher.tg_answer_callback("cb-1", "ok")
-            sub_fetcher.tg_answer_callback("cb-1", "ok again")
-            sub_fetcher.tg_answer_callback("cb-1", "and again")
+        with patch.object(hal, "tg_request", side_effect=fake_request):
+            hal.tg_answer_callback("cb-1", "ok")
+            hal.tg_answer_callback("cb-1", "ok again")
+            hal.tg_answer_callback("cb-1", "and again")
         # Only the first call reaches the Telegram API.
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1]["callback_query_id"], "cb-1")
@@ -4503,28 +4503,28 @@ class TestAnsweredCallbackDedupe(unittest.TestCase):
     def test_distinct_ids_pass_through(self):
         from unittest.mock import patch
         calls = []
-        with patch.object(sub_fetcher, "tg_request",
+        with patch.object(hal, "tg_request",
                           side_effect=lambda m, d=None: calls.append((m, d)) or {"ok": True}):
-            sub_fetcher.tg_answer_callback("cb-A", "ok")
-            sub_fetcher.tg_answer_callback("cb-B", "ok")
-            sub_fetcher.tg_answer_callback("cb-C", "ok")
+            hal.tg_answer_callback("cb-A", "ok")
+            hal.tg_answer_callback("cb-B", "ok")
+            hal.tg_answer_callback("cb-C", "ok")
         self.assertEqual(len(calls), 3)
 
     def test_dedupe_ring_buffer_caps_size(self):
         # Force a small cap to verify the ring eviction.
-        orig = sub_fetcher._ANSWERED_CALLBACK_IDS.maxlen
-        sub_fetcher._ANSWERED_CALLBACK_IDS = type(sub_fetcher._ANSWERED_CALLBACK_IDS)(maxlen=3)
-        sub_fetcher._ANSWERED_CALLBACK_SET.clear()
+        orig = hal._ANSWERED_CALLBACK_IDS.maxlen
+        hal._ANSWERED_CALLBACK_IDS = type(hal._ANSWERED_CALLBACK_IDS)(maxlen=3)
+        hal._ANSWERED_CALLBACK_SET.clear()
         try:
             for cid in ("c1", "c2", "c3", "c4"):
-                sub_fetcher._mark_callback_answered(cid)
+                hal._mark_callback_answered(cid)
             # c1 must have been evicted; c2..c4 must remain.
-            self.assertFalse(sub_fetcher._was_callback_answered("c1"))
-            self.assertTrue(sub_fetcher._was_callback_answered("c2"))
-            self.assertTrue(sub_fetcher._was_callback_answered("c4"))
+            self.assertFalse(hal._was_callback_answered("c1"))
+            self.assertTrue(hal._was_callback_answered("c2"))
+            self.assertTrue(hal._was_callback_answered("c4"))
         finally:
-            sub_fetcher._ANSWERED_CALLBACK_IDS = type(sub_fetcher._ANSWERED_CALLBACK_IDS)(maxlen=orig)
-            sub_fetcher._ANSWERED_CALLBACK_SET.clear()
+            hal._ANSWERED_CALLBACK_IDS = type(hal._ANSWERED_CALLBACK_IDS)(maxlen=orig)
+            hal._ANSWERED_CALLBACK_SET.clear()
 
     def test_http_400_on_answer_callback_is_demoted_to_debug(self):
         """tg_request must NOT log an ERROR when answerCallbackQuery 400s —
@@ -4540,16 +4540,16 @@ class TestAnsweredCallbackDedupe(unittest.TestCase):
                 captured.append(record)
 
         handler = StubHandler(level=_logging.DEBUG)
-        sub_fetcher.log.addHandler(handler)
-        prior = sub_fetcher.log.level
-        sub_fetcher.log.setLevel(_logging.DEBUG)
+        hal.log.addHandler(handler)
+        prior = hal.log.level
+        hal.log.setLevel(_logging.DEBUG)
 
         try:
             def fake_urlopen(req, timeout=None):
                 raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, None)
 
             with patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
-                sub_fetcher.tg_request("answerCallbackQuery",
+                hal.tg_request("answerCallbackQuery",
                                        {"callback_query_id": "x", "text": ""})
             error_records = [r for r in captured if r.levelno >= _logging.ERROR]
             debug_records = [r for r in captured if r.levelno == _logging.DEBUG]
@@ -4558,8 +4558,8 @@ class TestAnsweredCallbackDedupe(unittest.TestCase):
             self.assertTrue(any("already answered" in r.getMessage() for r in debug_records),
                             f"expected debug log; got {[r.getMessage() for r in debug_records]}")
         finally:
-            sub_fetcher.log.removeHandler(handler)
-            sub_fetcher.log.setLevel(prior)
+            hal.log.removeHandler(handler)
+            hal.log.setLevel(prior)
 
 
 class TestArchiveYearMismatchWarn(unittest.TestCase):
@@ -4598,7 +4598,7 @@ class TestArchiveYearMismatchWarn(unittest.TestCase):
                 captured.append(record)
 
         handler = StubHandler(level=_logging.WARNING)
-        sub_fetcher.log.addHandler(handler)
+        hal.log.addHandler(handler)
         try:
             opener, _ = self._opener_returning(
                 search_doc={
@@ -4619,13 +4619,13 @@ class TestArchiveYearMismatchWarn(unittest.TestCase):
                     }],
                 },
             )
-            out = sub_fetcher.search_archive_org("Night of the Living Dead", year=1968, opener=opener)
+            out = hal.search_archive_org("Night of the Living Dead", year=1968, opener=opener)
             self.assertEqual(len(out), 1, f"result should NOT be excluded, got {out}")
             warn_messages = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
             self.assertTrue(any("year mismatch" in m for m in warn_messages),
                             f"expected year mismatch warning, got {warn_messages}")
         finally:
-            sub_fetcher.log.removeHandler(handler)
+            hal.log.removeHandler(handler)
 
     def test_small_drift_no_warning(self):
         import logging as _logging
@@ -4638,7 +4638,7 @@ class TestArchiveYearMismatchWarn(unittest.TestCase):
                     captured.append(record)
 
         handler = StubHandler(level=_logging.WARNING)
-        sub_fetcher.log.addHandler(handler)
+        hal.log.addHandler(handler)
         try:
             opener, _ = self._opener_returning(
                 search_doc={
@@ -4659,11 +4659,11 @@ class TestArchiveYearMismatchWarn(unittest.TestCase):
                     }],
                 },
             )
-            out = sub_fetcher.search_archive_org("Night of the Living Dead", year=1968, opener=opener)
+            out = hal.search_archive_org("Night of the Living Dead", year=1968, opener=opener)
             self.assertEqual(len(out), 1)
             self.assertEqual(captured, [])
         finally:
-            sub_fetcher.log.removeHandler(handler)
+            hal.log.removeHandler(handler)
 
 
 class TestSyncableSubSuffixes(unittest.TestCase):
@@ -4678,21 +4678,21 @@ class TestSyncableSubSuffixes(unittest.TestCase):
             ("Film (2001).eng.srt", ".eng.srt"),
             ("Film (2001).english.srt", ".english.srt"),
         ]:
-            self.assertEqual(sub_fetcher.split_sub_suffix(name), expected, name)
+            self.assertEqual(hal.split_sub_suffix(name), expected, name)
 
     def test_longest_suffix_wins(self):
         # .it.hi.srt must not be truncated to .srt, or the video base would keep ".it.hi"
-        self.assertEqual(sub_fetcher.split_sub_suffix("Film.it.hi.srt"), ".it.hi.srt")
+        self.assertEqual(hal.split_sub_suffix("Film.it.hi.srt"), ".it.hi.srt")
 
     def test_ignores_non_subtitles_and_ass(self):
         # .ass is excluded: ffsubsync cannot rewrite it
         for name in ["Film (2001).mkv", "Film (2001).it.ass", "Film (2001).nfo", "notes.txt"]:
-            self.assertIsNone(sub_fetcher.split_sub_suffix(name), name)
+            self.assertIsNone(hal.split_sub_suffix(name), name)
 
     def test_suffix_list_covers_both_languages(self):
-        self.assertIn(".it.srt", sub_fetcher.SYNCABLE_SUB_SUFFIXES)
-        self.assertIn(".en.srt", sub_fetcher.SYNCABLE_SUB_SUFFIXES)
-        self.assertNotIn(".it.ass", sub_fetcher.SYNCABLE_SUB_SUFFIXES)
+        self.assertIn(".it.srt", hal.SYNCABLE_SUB_SUFFIXES)
+        self.assertIn(".en.srt", hal.SYNCABLE_SUB_SUFFIXES)
+        self.assertNotIn(".it.ass", hal.SYNCABLE_SUB_SUFFIXES)
 
     def test_has_italian_sub_still_ignores_english(self):
         tmpdir = tempfile.mkdtemp()
@@ -4700,9 +4700,9 @@ class TestSyncableSubSuffixes(unittest.TestCase):
             video = os.path.join(tmpdir, "Film (2001).mkv")
             open(video, "w").close()
             open(os.path.join(tmpdir, "Film (2001).en.srt"), "w").close()
-            self.assertFalse(sub_fetcher.has_italian_sub(video))
+            self.assertFalse(hal.has_italian_sub(video))
             open(os.path.join(tmpdir, "Film (2001).it.srt"), "w").close()
-            self.assertTrue(sub_fetcher.has_italian_sub(video))
+            self.assertTrue(hal.has_italian_sub(video))
         finally:
             shutil.rmtree(tmpdir)
 
@@ -4718,30 +4718,30 @@ class TestDoSyncCoversEnglish(unittest.TestCase):
         for suffix in [".mkv", ".it.srt", ".en.srt"]:
             open(base + suffix, "w").close()
 
-        self._orig = (sub_fetcher.FILMS_PATH, sub_fetcher.SERIES_PATH,
-                      sub_fetcher.sync_subtitle, sub_fetcher.tg_send,
-                      sub_fetcher.tg_edit_message)
+        self._orig = (hal.FILMS_PATH, hal.SERIES_PATH,
+                      hal.sync_subtitle, hal.tg_send,
+                      hal.tg_edit_message)
         self.synced = []
-        sub_fetcher.FILMS_PATH = self.films
-        sub_fetcher.SERIES_PATH = os.path.join(self.tmpdir, "missing")
-        sub_fetcher.sync_subtitle = lambda v, s, min_score=0: (self.synced.append(s), {"ok": True})[1]
-        sub_fetcher.tg_send = lambda *a, **k: None
-        sub_fetcher.tg_edit_message = lambda *a, **k: None
+        hal.FILMS_PATH = self.films
+        hal.SERIES_PATH = os.path.join(self.tmpdir, "missing")
+        hal.sync_subtitle = lambda v, s, min_score=0: (self.synced.append(s), {"ok": True})[1]
+        hal.tg_send = lambda *a, **k: None
+        hal.tg_edit_message = lambda *a, **k: None
 
     def tearDown(self):
-        (sub_fetcher.FILMS_PATH, sub_fetcher.SERIES_PATH, sub_fetcher.sync_subtitle,
-         sub_fetcher.tg_send, sub_fetcher.tg_edit_message) = self._orig
+        (hal.FILMS_PATH, hal.SERIES_PATH, hal.sync_subtitle,
+         hal.tg_send, hal.tg_edit_message) = self._orig
         shutil.rmtree(self.tmpdir)
 
     def test_syncs_both_languages(self):
-        sub_fetcher.do_sync("all", {})
+        hal.do_sync("all", {})
         synced = sorted(os.path.basename(p) for p in self.synced)
         self.assertEqual(synced, ["Film (2001).en.srt", "Film (2001).it.srt"])
 
     def test_video_is_resolved_for_english_sub(self):
         # If the suffix were stripped wrongly the .en.srt would match no video
         # and be dropped silently instead of being synced.
-        sub_fetcher.do_sync("all", {})
+        hal.do_sync("all", {})
         self.assertEqual(len(self.synced), 2)
 
 
@@ -4749,34 +4749,34 @@ class TestSubengCommandRegistry(unittest.TestCase):
     """/subeng must be reachable via its canonical form and both aliases."""
 
     def test_canonical_resolves(self):
-        spec = sub_fetcher._find_command("/subeng")
+        spec = hal._find_command("/subeng")
         self.assertIsNotNone(spec)
         self.assertEqual(spec["canonical"], "/subeng")
 
     def test_aliases_resolve_to_same_spec(self):
         for alias in ["/eng", "/en"]:
-            spec = sub_fetcher._find_command(alias)
+            spec = hal._find_command(alias)
             self.assertIsNotNone(spec, alias)
             self.assertEqual(spec["canonical"], "/subeng", alias)
 
     def test_alias_does_not_shadow_ita(self):
         # /ita is the Radarr shortcut; /eng must NOT be wired to it by accident.
-        self.assertEqual(sub_fetcher._find_command("/ita")["canonical"], "/ita")
-        self.assertNotEqual(sub_fetcher._find_command("/eng")["canonical"], "/ita")
+        self.assertEqual(hal._find_command("/ita")["canonical"], "/ita")
+        self.assertNotEqual(hal._find_command("/eng")["canonical"], "/ita")
 
     def test_typo_gets_did_you_mean(self):
-        self.assertEqual(sub_fetcher._suggest_command("/subengg"), "/subeng")
+        self.assertEqual(hal._suggest_command("/subengg"), "/subeng")
 
     def test_appears_in_help_registry(self):
-        canon = [c["canonical"] for c in sub_fetcher.COMMANDS]
+        canon = [c["canonical"] for c in hal.COMMANDS]
         self.assertIn("/subeng", canon)
-        spec = sub_fetcher._find_command("/subeng")
+        spec = hal._find_command("/subeng")
         self.assertEqual(spec["group"], "Gestione sub")
         self.assertTrue(spec["desc"])
 
     def test_handler_is_wired(self):
-        self.assertIs(sub_fetcher._find_command("/subeng")["handler"],
-                      sub_fetcher._cmd_subeng)
+        self.assertIs(hal._find_command("/subeng")["handler"],
+                      hal._cmd_subeng)
 
 
 class TestSubengCommandDispatch(unittest.TestCase):
@@ -4785,11 +4785,11 @@ class TestSubengCommandDispatch(unittest.TestCase):
     def _run(self, arg):
         from unittest.mock import patch
         captured = []
-        with patch.object(sub_fetcher.download_queue, "put", side_effect=captured.append), \
-                patch.object(sub_fetcher, "tg_send",
+        with patch.object(hal.download_queue, "put", side_effect=captured.append), \
+                patch.object(hal, "tg_send",
                              return_value={"ok": True, "result": {"message_id": 7}}), \
-                patch.object(sub_fetcher, "queue_position", return_value=0):
-            sub_fetcher._cmd_subeng(arg, state={}, excludes=[])
+                patch.object(hal, "queue_position", return_value=0):
+            hal._cmd_subeng(arg, state={}, excludes=[])
         return captured
 
     def test_enqueues_subeng_job(self):
@@ -4806,9 +4806,9 @@ class TestSubengCommandDispatch(unittest.TestCase):
         from unittest.mock import patch
         sent = []
         job = {"type": "subeng", "query": "Pluribus"}
-        with patch.object(sub_fetcher.download_queue, "queue", [job], create=True), \
-                patch.object(sub_fetcher, "tg_send", side_effect=lambda t, **k: sent.append(t)):
-            sub_fetcher._cmd_coda("", state={}, excludes=[])
+        with patch.object(hal.download_queue, "queue", [job], create=True), \
+                patch.object(hal, "tg_send", side_effect=lambda t, **k: sent.append(t)):
+            hal._cmd_coda("", state={}, excludes=[])
         self.assertTrue(sent)
         # Must not fall through to the raw job-type branch.
         self.assertNotIn("1. subeng", sent[0])
@@ -4826,23 +4826,23 @@ class _SubengFixture(unittest.TestCase):
         self.video = os.path.join(self.moviedir, "Film (2001).mkv")
         open(self.video, "w").close()
 
-        self._orig = {k: getattr(sub_fetcher, k) for k in
+        self._orig = {k: getattr(hal, k) for k in
                       ["FILMS_PATH", "SERIES_PATH", "SubdlClient", "OSClient",
                        "_try_save_eng", "tg_send", "tg_edit_message", "BATCHES_FILE"]}
-        sub_fetcher.FILMS_PATH = self.films
-        sub_fetcher.SERIES_PATH = os.path.join(self.tmpdir, "missing")
-        sub_fetcher.BATCHES_FILE = os.path.join(self.tmpdir, "batches.json")
-        sub_fetcher.SubdlClient = lambda *a, **k: object()
-        sub_fetcher.OSClient = lambda *a, **k: _FakeOSClient()
+        hal.FILMS_PATH = self.films
+        hal.SERIES_PATH = os.path.join(self.tmpdir, "missing")
+        hal.BATCHES_FILE = os.path.join(self.tmpdir, "batches.json")
+        hal.SubdlClient = lambda *a, **k: object()
+        hal.OSClient = lambda *a, **k: _FakeOSClient()
         self.sent = []
         self.edited = []
-        sub_fetcher.tg_send = lambda t, **k: (self.sent.append((t, k)),
+        hal.tg_send = lambda t, **k: (self.sent.append((t, k)),
                                               {"ok": True, "result": {"message_id": 1}})[1]
-        sub_fetcher.tg_edit_message = lambda mid, t, **k: self.edited.append((mid, t, k))
+        hal.tg_edit_message = lambda mid, t, **k: self.edited.append((mid, t, k))
 
     def tearDown(self):
         for k, v in self._orig.items():
-            setattr(sub_fetcher, k, v)
+            setattr(hal, k, v)
         shutil.rmtree(self.tmpdir)
 
     def base(self, suffix):
@@ -4871,9 +4871,9 @@ class TestReplaceEnglishSub(_SubengFixture):
             with open(dest, "w") as f:
                 f.write("new")
             return True
-        sub_fetcher._try_save_eng = fake_save
+        hal._try_save_eng = fake_save
 
-        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        ok = hal.replace_english_sub(object(), _FakeOSClient(), False, self.video)
         self.assertTrue(ok)
         with open(self.base(".en.srt")) as f:
             self.assertEqual(f.read(), "new")
@@ -4887,9 +4887,9 @@ class TestReplaceEnglishSub(_SubengFixture):
                 f.write("candidate")
             os.remove(dest)
             return False
-        sub_fetcher._try_save_eng = fake_save
+        hal._try_save_eng = fake_save
 
-        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        ok = hal.replace_english_sub(object(), _FakeOSClient(), False, self.video)
         self.assertFalse(ok)
         self.assertTrue(os.path.exists(self.base(".en.srt")))
         with open(self.base(".en.srt")) as f:
@@ -4900,9 +4900,9 @@ class TestReplaceEnglishSub(_SubengFixture):
 
         def boom(*a, **k):
             raise RuntimeError("provider down")
-        sub_fetcher._try_save_eng = boom
+        hal._try_save_eng = boom
 
-        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        ok = hal.replace_english_sub(object(), _FakeOSClient(), False, self.video)
         self.assertFalse(ok)
         with open(self.base(".en.srt")) as f:
             self.assertEqual(f.read(), "old-but-mine")
@@ -4915,9 +4915,9 @@ class TestReplaceEnglishSub(_SubengFixture):
             with open(dest, "w") as f:
                 f.write("new")
             return True
-        sub_fetcher._try_save_eng = fake_save
+        hal._try_save_eng = fake_save
 
-        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        ok = hal.replace_english_sub(object(), _FakeOSClient(), False, self.video)
         self.assertTrue(ok)
         self.assertFalse(os.path.exists(self.base(".eng.srt")))
         with open(self.base(".en.srt")) as f:
@@ -4925,18 +4925,18 @@ class TestReplaceEnglishSub(_SubengFixture):
 
     def test_failed_search_restores_differently_named_old_sub(self):
         self.write(".english.srt", "old")
-        sub_fetcher._try_save_eng = lambda *a, **k: False
+        hal._try_save_eng = lambda *a, **k: False
 
-        ok = sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        ok = hal.replace_english_sub(object(), _FakeOSClient(), False, self.video)
         self.assertFalse(ok)
         with open(self.base(".english.srt")) as f:
             self.assertEqual(f.read(), "old")
 
     def test_leaves_italian_sub_untouched(self):
         self.write(".it.srt", "italiano")
-        sub_fetcher._try_save_eng = lambda *a, **k: False
+        hal._try_save_eng = lambda *a, **k: False
 
-        sub_fetcher.replace_english_sub(object(), _FakeOSClient(), False, self.video)
+        hal.replace_english_sub(object(), _FakeOSClient(), False, self.video)
         with open(self.base(".it.srt")) as f:
             self.assertEqual(f.read(), "italiano")
 
@@ -4946,8 +4946,8 @@ class TestDoDownloadEnglish(_SubengFixture):
 
     def test_no_match_reports_and_searches_nothing(self):
         called = []
-        sub_fetcher._try_save_eng = lambda *a, **k: called.append(1)
-        sub_fetcher.do_download_english("Inesistente", {})
+        hal._try_save_eng = lambda *a, **k: called.append(1)
+        hal.do_download_english("Inesistente", {})
         self.assertEqual(called, [])
         self.assertTrue(any("Inesistente" in t for t, _ in self.sent))
 
@@ -4961,17 +4961,17 @@ class TestDoDownloadEnglish(_SubengFixture):
             with open(dest, "w") as f:
                 f.write("new")
             return True
-        sub_fetcher._try_save_eng = fake_save
+        hal._try_save_eng = fake_save
 
-        sub_fetcher.do_download_english("Film", {})
+        hal.do_download_english("Film", {})
         self.assertEqual(searched, [self.video])
 
     def test_existing_sub_asks_before_replacing(self):
         self.write(".en.srt", "old")
         called = []
-        sub_fetcher._try_save_eng = lambda *a, **k: called.append(1)
+        hal._try_save_eng = lambda *a, **k: called.append(1)
 
-        sub_fetcher.do_download_english("Film", {})
+        hal.do_download_english("Film", {})
 
         # Nothing searched yet — the user has to press a button first.
         self.assertEqual(called, [])
@@ -4985,11 +4985,11 @@ class TestDoDownloadEnglish(_SubengFixture):
         self.write(".en.srt", "old")
         other = os.path.join(self.moviedir, "Film (2001) part2.mkv")
         open(other, "w").close()
-        sub_fetcher._try_save_eng = lambda *a, **k: False
+        hal._try_save_eng = lambda *a, **k: False
 
-        sub_fetcher.do_download_english("Film", {})
+        hal.do_download_english("Film", {})
 
-        batches = sub_fetcher.load_batches()
+        batches = hal.load_batches()
         entry = [b for b in batches.values() if b.get("type") == "subeng"]
         self.assertEqual(len(entry), 1)
         self.assertEqual(sorted(entry[0]["paths"]), sorted([self.video, other]))
@@ -5002,15 +5002,15 @@ class TestDoDownloadEnglish(_SubengFixture):
         def fake_save(subdl, client, logged_in, video, dest, trace):
             searched.append(video)
             return False
-        sub_fetcher._try_save_eng = fake_save
+        hal._try_save_eng = fake_save
 
-        sub_fetcher.do_download_english("Film", {}, paths=[self.video])
+        hal.do_download_english("Film", {}, paths=[self.video])
         self.assertEqual(searched, [self.video])
 
     def test_empty_explicit_paths_reports_nothing_to_do(self):
         called = []
-        sub_fetcher._try_save_eng = lambda *a, **k: called.append(1)
-        sub_fetcher.do_download_english("Film", {}, paths=[])
+        hal._try_save_eng = lambda *a, **k: called.append(1)
+        hal.do_download_english("Film", {}, paths=[])
         self.assertEqual(called, [])
 
     def test_summary_counts_hits_and_misses(self):
@@ -5023,9 +5023,9 @@ class TestDoDownloadEnglish(_SubengFixture):
                     f.write("new")
                 return True
             return False
-        sub_fetcher._try_save_eng = fake_save
+        hal._try_save_eng = fake_save
 
-        sub_fetcher.do_download_english("Film", {}, progress_msg_id=42)
+        hal.do_download_english("Film", {}, progress_msg_id=42)
         final = self.edited[-1][1]
         self.assertIn("1", final)
         self.assertIn("2", final)

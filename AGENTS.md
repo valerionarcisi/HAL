@@ -1,10 +1,10 @@
-# Sub ITA Fetcher - Agent Guidelines
+# HAL - Agent Guidelines
 
 ## Project Overview
 Telegram-interactive Italian subtitle downloader. Scans media folders, finds videos missing Italian subs, asks via Telegram whether to download them, and saves them with the correct filename. Runs as a long-lived Docker container.
 
 ## Architecture
-Single-file Python 3 application (`sub_fetcher.py`). External deps: `ffmpeg` (audio detection via ffprobe), `ffsubsync` (subtitle-to-audio sync). Two subtitle providers: **Subdl.com** (primary, no VIP placeholders) and **OpenSubtitles.org** (fallback). Translation pipeline: **DeepL** (cue-by-cue, no truncation) → optional **Claude Haiku polish** pass that rewrites only unnatural lines → falls back to full **Claude Sonnet** translation if DeepL is unavailable. Both `.en.srt` and `.it.srt` are saved. Containerized via `Dockerfile` (python:3.11-slim + gcc for webrtcvad build).
+Single-file Python 3 application (`hal.py`). External deps: `ffmpeg` (audio detection via ffprobe), `ffsubsync` (subtitle-to-audio sync). Two subtitle providers: **Subdl.com** (primary, no VIP placeholders) and **OpenSubtitles.org** (fallback). Translation pipeline: **DeepL** (cue-by-cue, no truncation) → optional **Claude Haiku polish** pass that rewrites only unnatural lines → falls back to full **Claude Sonnet** translation if DeepL is unavailable. Both `.en.srt` and `.it.srt` are saved. Containerized via `Dockerfile` (python:3.11-slim + gcc for webrtcvad build).
 
 ### Key Components
 - **SubdlClient**: primary provider, REST API, downloads ZIP archives. Episode matching (+500 correct, -1000 wrong) prevents downloading wrong episode subs.
@@ -24,7 +24,7 @@ Single-file Python 3 application (`sub_fetcher.py`). External deps: `ffmpeg` (au
 
 ## How to Run Tests
 ```bash
-python3 test_sub_fetcher.py -v
+python3 test_hal.py -v
 ```
 Tests use only `unittest` (stdlib). The test harness patches `/config` paths to a temp directory. 55 tests covering parsing, search cascade, grouping, placeholder detection, Subdl client, ffprobe mocking, episode matching, two-phase download, manual search with dots, queue job types.
 
@@ -57,7 +57,7 @@ Tests use only `unittest` (stdlib). The test harness patches `/config` paths to 
 
 ## Docker
 ```bash
-docker compose up -d --build sub-fetcher
+docker compose up -d --build hal
 ```
 
 ## Telegram Commands

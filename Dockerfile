@@ -8,6 +8,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg gcc libc
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY sub_fetcher.py .
+COPY hal.py .
 
-CMD ["python3", "-u", "sub_fetcher.py"]
+CMD ["python3", "-u", "hal.py"]

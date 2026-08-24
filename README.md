@@ -1,4 +1,4 @@
-# Sub ITA Fetcher
+# HAL
 
 Automated Italian subtitle downloader with Telegram bot interface. Scans your media library, finds videos missing Italian subtitles, and downloads/translates them automatically.
 
@@ -56,16 +56,16 @@ Phase 2 (PAID, user confirms):
 Add to your `docker-compose.yml`:
 
 ```yaml
-sub-fetcher:
+hal:
   build:
-    context: ./sub-fetcher
+    context: ./hal
     dockerfile: Dockerfile
-  container_name: sub-fetcher
+  container_name: hal
   restart: unless-stopped
   volumes:
     - /path/to/series:/media/series
     - /path/to/films:/media/films
-    - ./sub-fetcher:/config
+    - ./hal:/config
   environment:
     - TELEGRAM_BOT_TOKEN=your_token
     - TELEGRAM_CHAT_ID=your_chat_id
@@ -84,12 +84,12 @@ sub-fetcher:
     - CERCA_MIN_RESOLUTION=720                                # optional, default 720
 ```
 
-For `/cerca` to use YouTube reliably, drop a Netscape cookies.txt at `sub-fetcher/secrets/yt_cookies.txt` on the host. The directory is gitignored (`secrets/` in `.gitignore`). yt-dlp uses those cookies to bypass age-gate / consent walls. Without cookies, archive.org still works.
+For `/cerca` to use YouTube reliably, drop a Netscape cookies.txt at `hal/secrets/yt_cookies.txt` on the host. The directory is gitignored (`secrets/` in `.gitignore`). yt-dlp uses those cookies to bypass age-gate / consent walls. Without cookies, archive.org still works.
 
 ### 3. Run
 
 ```bash
-docker compose up -d --build sub-fetcher
+docker compose up -d --build hal
 ```
 
 ## Telegram Commands
@@ -146,7 +146,7 @@ For each video, the bot tries multiple strategies in order:
 
 ## Architecture
 
-Single Python file (`sub_fetcher.py`), no frameworks. Runs as a long-lived process inside Docker.
+Single Python file (`hal.py`), no frameworks. Runs as a long-lived process inside Docker.
 
 | Component | Technology |
 |---|---|
@@ -164,8 +164,8 @@ Single Python file (`sub_fetcher.py`), no frameworks. Runs as a long-lived proce
 ## File Structure
 
 ```
-sub_fetcher.py           # Main application (single file)
-test_sub_fetcher.py      # Unit tests (55 tests)
+hal.py           # Main application (single file)
+test_hal.py      # Unit tests (55 tests)
 Dockerfile               # Container definition
 SPEC.md                  # Technical specification
 AGENTS.md                # Agent/AI coding guidelines
@@ -175,7 +175,7 @@ AGENTS.md                # Agent/AI coding guidelines
 
 ### Run tests
 ```bash
-python3 -m unittest test_sub_fetcher -v
+python3 -m unittest test_hal -v
 ```
 
 ### Pre-commit hook
@@ -186,12 +186,12 @@ git config core.hooksPath .githooks
 
 ### Rebuild and restart
 ```bash
-docker compose up -d --build sub-fetcher
+docker compose up -d --build hal
 ```
 
 ### View logs
 ```bash
-docker logs -f sub-fetcher --tail 50
+docker logs -f hal --tail 50
 ```
 
 ## License
