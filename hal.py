@@ -942,22 +942,15 @@ def scan_missing(state, excludes):
                     if status == "failed" and now - t < timedelta(hours=FAILED_RETRY_HOURS):
                         continue  # Download failed (incl. EN-only backfill), wait before retrying
 
-                # Italian audio/original still need the EN sub (VO guarantee) —
-                # only skip once both subs are present.
+                # Italian audio means the film needs no subs at all — skip outright.
+                # The EN+IT (VO) guarantee only applies to non-Italian audio.
                 if has_italian_audio(full_path):
-                    if has_en:
-                        log.info(f"  Skipping (Italian audio, EN sub present): {fname}")
-                        continue
-                    log.info(f"  Italian audio but EN sub missing, queuing EN-only: {fname}")
-                    missing.append(full_path)
+                    log.info(f"  Skipping (Italian audio): {fname}")
                     continue
 
                 # Cached "Italian original via TMDb" — set on first detection.
+                # Same rule: Italian-original films need no subs.
                 if full_path in state.get("italian_original", {}):
-                    if has_en:
-                        continue
-                    log.info(f"  Italian original but EN sub missing, queuing EN-only: {fname}")
-                    missing.append(full_path)
                     continue
 
                 if full_path in state["downloaded"]:
@@ -969,16 +962,13 @@ def scan_missing(state, excludes):
 
                 # New video — check TMDb for Italian original_language.
                 # Cached afterwards so we don't re-query at every scan.
+                # Italian-original films need no subs at all.
                 if is_italian_original(full_path):
+                    log.info(f"  Skipping (Italian original via TMDb): {fname}")
                     state.setdefault("italian_original", {})[full_path] = {
                         "time": datetime.now().isoformat(),
                     }
                     save_state(state)
-                    if has_en:
-                        log.info(f"  Skipping (Italian original via TMDb): {fname}")
-                        continue
-                    log.info(f"  Italian original but EN sub missing, queuing EN-only: {fname}")
-                    missing.append(full_path)
                     continue
 
                 _notify_new_media(state, full_path, media_path)

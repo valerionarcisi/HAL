@@ -455,7 +455,7 @@ class TestItalianOriginalDetection(unittest.TestCase):
                 hal.is_italian_original("/media/films/Random Movie (2020)/film.mkv")
             )
 
-    def test_scan_missing_queues_italian_original_when_en_missing(self):
+    def test_scan_missing_skips_italian_originals_and_caches(self):
         from unittest.mock import patch
         tmp = tempfile.mkdtemp()
         try:
@@ -472,33 +472,7 @@ class TestItalianOriginalDetection(unittest.TestCase):
                  patch.object(hal, "is_italian_original", return_value=True), \
                  patch.object(hal, "save_state"):
                 missing = hal.scan_missing(state, excludes=set())
-            self.assertEqual(missing, [video],
-                "Italian-original film without EN sub must still be queued for EN-only fetch")
-            self.assertIn(video, state["italian_original"],
-                "Italian-original detection should be cached in state")
-        finally:
-            shutil.rmtree(tmp)
-
-    def test_scan_missing_skips_italian_originals_when_en_present(self):
-        from unittest.mock import patch
-        tmp = tempfile.mkdtemp()
-        try:
-            italian_dir = os.path.join(tmp, "La Grande Bellezza (2013)")
-            os.makedirs(italian_dir)
-            video = os.path.join(italian_dir, "La Grande Bellezza.mkv")
-            open(video, "w").close()
-            open(os.path.join(italian_dir, "La Grande Bellezza.en.srt"), "w").close()
-
-            state = {"asked": {}, "downloaded": {}, "italian_original": {}}
-
-            with patch.object(hal, "FILMS_PATH", tmp), \
-                 patch.object(hal, "SERIES_PATH", "/nonexistent"), \
-                 patch.object(hal, "has_italian_audio", return_value=False), \
-                 patch.object(hal, "is_italian_original", return_value=True), \
-                 patch.object(hal, "save_state"):
-                missing = hal.scan_missing(state, excludes=set())
-            self.assertEqual(missing, [],
-                "Italian-original film with EN sub already present must not be queued")
+            self.assertEqual(missing, [], "Italian-original film must not be in missing list")
             self.assertIn(video, state["italian_original"],
                 "Italian-original detection should be cached in state")
         finally:
