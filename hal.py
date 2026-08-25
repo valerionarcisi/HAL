@@ -928,6 +928,20 @@ def scan_missing(state, excludes):
                 if is_excluded(full_path, excludes):
                     continue
 
+                # Check state FIRST — a recent "failed"/"no"/"pending" mark must
+                # hold back retries regardless of which branch below would
+                # otherwise queue this file (EN-only backfill included).
+                info = state["asked"].get(full_path)
+                if info:
+                    t = datetime.fromisoformat(info["time"])
+                    status = info["status"]
+                    if status == "pending":
+                        continue  # Already asked, waiting for response
+                    if status == "no" and now - t < timedelta(hours=RETRY_AFTER_HOURS):
+                        continue  # User said no, wait before re-asking
+                    if status == "failed" and now - t < timedelta(hours=FAILED_RETRY_HOURS):
+                        continue  # Download failed (incl. EN-only backfill), wait before retrying
+
                 # Italian audio/original still need the EN sub (VO guarantee) —
                 # only skip once both subs are present.
                 if has_italian_audio(full_path):
@@ -945,18 +959,6 @@ def scan_missing(state, excludes):
                     log.info(f"  Italian original but EN sub missing, queuing EN-only: {fname}")
                     missing.append(full_path)
                     continue
-
-                # Check state
-                info = state["asked"].get(full_path)
-                if info:
-                    t = datetime.fromisoformat(info["time"])
-                    status = info["status"]
-                    if status == "pending":
-                        continue  # Already asked, waiting for response
-                    if status == "no" and now - t < timedelta(hours=RETRY_AFTER_HOURS):
-                        continue  # User said no, wait before re-asking
-                    if status == "failed" and now - t < timedelta(hours=FAILED_RETRY_HOURS):
-                        continue  # Download failed, wait before retrying
 
                 if full_path in state["downloaded"]:
                     if has_en:
@@ -7087,6 +7089,12 @@ def do_batch_download(paths, state, progress_msg_id=None):
                 else:
                     not_found += 1
                     failed_names.append(friendly_name(video_path))
+                    # Mark failed so scan_missing doesn't retry this EN-only
+                    # backfill every scan cycle (see FAILED_RETRY_HOURS).
+                    state["asked"][video_path] = {
+                        "time": datetime.now().isoformat(), "status": "failed",
+                    }
+                    save_state(state)
                 time.sleep(1)
                 continue
 
