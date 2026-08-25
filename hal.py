@@ -4100,6 +4100,40 @@ def _notify_radarr_request_ready(video_path):
     )
 
 
+def check_translation_quality(eng_srt, it_srt):
+    """Structural sanity check on a translated SRT, no extra API calls.
+
+    Flags a translation as suspect when too many cues are empty or left
+    identical to the English source (silent per-cue translation failures),
+    or when the cue count doesn't match the original.
+
+    Returns (ok: bool, reason: str or None).
+    """
+    en_blocks = parse_srt(eng_srt)
+    it_blocks = parse_srt(it_srt)
+
+    if not en_blocks:
+        return True, None  # nothing to compare against
+
+    if len(it_blocks) != len(en_blocks):
+        return False, f"cue count mismatch (EN {len(en_blocks)} vs IT {len(it_blocks)})"
+
+    suspect = 0
+    for (_, _, en_text), (_, _, it_text) in zip(en_blocks, it_blocks):
+        en_clean = en_text.strip()
+        it_clean = it_text.strip()
+        if not en_clean:
+            continue  # nothing to translate in this cue
+        if not it_clean or it_clean == en_clean:
+            suspect += 1
+
+    ratio = suspect / len(en_blocks)
+    if ratio > 0.15:
+        return False, f"{suspect}/{len(en_blocks)} cues untranslated or empty ({ratio:.0%})"
+
+    return True, None
+
+
 def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=False):
     """Translate English content to Italian and save. Returns True on success.
     Also saves the English subtitle as .en.srt alongside the Italian one.
@@ -4140,6 +4174,10 @@ def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=
         log.error(f"  Translation failed for: {os.path.basename(video_path)}")
         return False
 
+    quality_ok, quality_reason = check_translation_quality(eng_text, translated_srt)
+    if not quality_ok:
+        log.warning(f"  Translation quality check failed: {quality_reason}")
+
     sub_path = os.path.splitext(video_path)[0] + ".it.srt"
     with open(sub_path, "w", encoding="utf-8") as f:
         f.write(translated_srt)
@@ -4163,7 +4201,17 @@ def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=
 
     _save_sub_and_update_state(video_path, sub_path, f"{engine} EN→IT translation", state)
     log.info(f"  ✅ Translated & saved: {os.path.basename(sub_path)}")
-    if not silent:
+
+    # Quality warning goes out regardless of `silent` — a suspect translation
+    # left unflagged during an automated backfill would never reach the user.
+    if not quality_ok:
+        tg_send(
+            f"⚠️ Sub ITA tradotto ma sospetto ({quality_reason}):\n"
+            f"<b>{friendly_name(video_path)}</b>\n"
+            f"📁 {os.path.basename(sub_path)}\n"
+            f"Controlla il file, la traduzione potrebbe essere incompleta o errata."
+        )
+    elif not silent:
         tg_send(
             f"🤖 Sub ITA tradotto da ENG ({engine}):\n"
             f"<b>{friendly_name(video_path)}</b>\n"

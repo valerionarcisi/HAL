@@ -5031,5 +5031,48 @@ class TestDoDownloadEnglish(_SubengFixture):
         self.assertIn("2", final)
 
 
+class TestCheckTranslationQuality(unittest.TestCase):
+    def _srt(self, texts):
+        blocks = []
+        for i, text in enumerate(texts, start=1):
+            start = f"00:00:{i:02d},000"
+            end = f"00:00:{i+1:02d},000"
+            blocks.append(f"{i}\n{start} --> {end}\n{text}")
+        return "\n\n".join(blocks) + "\n"
+
+    def test_good_translation_passes(self):
+        en = self._srt(["Hello there", "How are you", "Goodbye"])
+        it = self._srt(["Ciao", "Come stai", "Arrivederci"])
+        ok, reason = hal.check_translation_quality(en, it)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+
+    def test_cue_count_mismatch_fails(self):
+        en = self._srt(["Hello there", "How are you", "Goodbye"])
+        it = self._srt(["Ciao", "Arrivederci"])
+        ok, reason = hal.check_translation_quality(en, it)
+        self.assertFalse(ok)
+        self.assertIn("cue count mismatch", reason)
+
+    def test_too_many_untranslated_cues_fails(self):
+        en = self._srt(["Hello there", "How are you", "Goodbye", "See you"])
+        it = self._srt(["Ciao", "How are you", "Goodbye", "A dopo"])
+        ok, reason = hal.check_translation_quality(en, it)
+        self.assertFalse(ok)
+        self.assertIn("untranslated or empty", reason)
+
+    def test_empty_source_cues_are_ignored(self):
+        en = self._srt(["Hello", "", "Goodbye"])
+        it = self._srt(["Ciao", "", "Arrivederci"])
+        ok, reason = hal.check_translation_quality(en, it)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+
+    def test_no_source_blocks_is_ok(self):
+        ok, reason = hal.check_translation_quality("", "")
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+
+
 if __name__ == "__main__":
     unittest.main()
