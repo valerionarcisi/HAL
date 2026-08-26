@@ -5074,5 +5074,49 @@ class TestCheckTranslationQuality(unittest.TestCase):
         self.assertIsNone(reason)
 
 
+class TestScaricaSearchShowsDirector(unittest.TestCase):
+    """/scarica (/req) disambiguation buttons include the director, so
+    same-title films can be told apart without opening TMDb."""
+
+    def setUp(self):
+        self._orig = {k: getattr(hal, k) for k in
+                      ["RADARR_URL", "RADARR_API_KEY", "TMDB_API_KEY",
+                       "tmdb_search_movies", "tmdb_get_movie_details",
+                       "tg_send", "tg_edit_message",
+                       "load_requests", "save_requests"]}
+        hal.RADARR_URL = "http://radarr:7878"
+        hal.RADARR_API_KEY = "key"
+        hal.TMDB_API_KEY = "key"
+        hal.tmdb_search_movies = lambda query, year=None, limit=5: [
+            {"tmdb_id": 1, "title": "Tony", "year": 2026,
+             "original_language": "en", "overview": "", "poster_url": None},
+            {"tmdb_id": 2, "title": "Tony", "year": 2010,
+             "original_language": "it", "overview": "", "poster_url": None},
+        ]
+        hal.tmdb_get_movie_details = lambda tmdb_id: {
+            "runtime_min": 100,
+            "director": "Matteo Garrone" if tmdb_id == 2 else "Some Director",
+        }
+        self.sent = []
+        self.edited = []
+        hal.tg_send = lambda t, **k: (self.sent.append((t, k)),
+                                      {"ok": True, "result": {"message_id": 1}})[1]
+        hal.tg_edit_message = lambda mid, t, **k: self.edited.append((mid, t, k))
+        hal.load_requests = lambda: {}
+        hal.save_requests = lambda r: None
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(hal, k, v)
+
+    def test_director_appears_in_candidate_labels(self):
+        hal.do_scarica_search("Tony")
+        self.assertEqual(len(self.sent), 1)
+        _, kwargs = self.sent[0]
+        labels = [row[0]["text"] for row in kwargs["reply_markup"]["inline_keyboard"][:-1]]
+        self.assertTrue(any("Matteo Garrone" in l for l in labels))
+        self.assertTrue(any("Some Director" in l for l in labels))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4703,7 +4703,9 @@ def do_scarica_search(query, progress_msg_id=None, lang=None, lang_source=None):
     for c in candidates:
         ryear = f" ({c['year']})" if c["year"] else ""
         lang = (c["original_language"] or "?").upper()
-        label = f"🎬 {c['title']}{ryear} — {lang}"[:80]
+        director = tmdb_get_movie_details(c["tmdb_id"]).get("director")
+        director_part = f" — {director}" if director else ""
+        label = f"🎬 {c['title']}{ryear}{director_part} — {lang}"[:80]
         rows.append([{"text": label, "callback_data": f"radarr_pick:{film_hash}:{c['tmdb_id']}"}])
     rows.append([{"text": "❌ Annulla", "callback_data": f"radarr_cancel:{film_hash}"}])
 
