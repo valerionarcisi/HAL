@@ -669,11 +669,27 @@ def tmdb_search_person(query, limit=5):
     return out
 
 
+_WEIGHTED_RATING_MIN_VOTES = 50  # m in the IMDb/TMDb weighted-rating formula
+
+
+def _weighted_rating(vote_average, vote_count, global_mean):
+    """IMDb/TMDb 'true Bayesian estimate': WR = (v/(v+m))*R + (m/(v+m))*C.
+    Pulls low-vote-count films toward the dataset mean so a film with 2
+    ratings of 10 can't outrank a 5000-vote classic at 8.5. `m` is the
+    minimum-votes threshold below which a film gets pulled hard toward C."""
+    v = vote_count
+    m = _WEIGHTED_RATING_MIN_VOTES
+    return (v / (v + m)) * vote_average + (m / (v + m)) * global_mean
+
+
 def tmdb_get_director_filmography(person_id):
     """Fetch every film this person directed via TMDb `movie_credits`,
     filtering crew entries to job == 'Director'. Returns a list of
-    {tmdb_id, title, year, popularity, original_language} sorted by
-    popularity descending (TMDb's own metric, no extra API calls needed).
+    {tmdb_id, title, year, vote_average, vote_count, weighted_rating,
+    original_language} sorted by weighted_rating descending — a Bayesian
+    vote-average that favors well-established, well-rated films over
+    trending-but-thin-data new releases. No extra API calls needed:
+    vote_average/vote_count already ride along in movie_credits.
     Runtime is NOT included here — /regista fetches it lazily per-title
     only for the candidates actually shown, to avoid N detail calls upfront."""
     if not TMDB_API_KEY or not person_id:
@@ -700,10 +716,15 @@ def tmdb_get_director_filmography(person_id):
             "tmdb_id": tmdb_id,
             "title": c.get("title") or c.get("original_title") or "?",
             "year": ryear,
-            "popularity": c.get("popularity") or 0,
+            "vote_average": c.get("vote_average") or 0,
+            "vote_count": c.get("vote_count") or 0,
             "original_language": c.get("original_language"),
         })
-    out.sort(key=lambda m: m["popularity"], reverse=True)
+    if out:
+        global_mean = sum(f["vote_average"] for f in out) / len(out)
+        for f in out:
+            f["weighted_rating"] = _weighted_rating(f["vote_average"], f["vote_count"], global_mean)
+        out.sort(key=lambda m: m["weighted_rating"], reverse=True)
     return out
 
 
@@ -4871,7 +4892,10 @@ def do_regista_filmography(person_id, person_name, progress_msg_id=None):
 
 def _render_regista_page(film_hash, progress_msg_id=None):
     """Render (or re-render, after a toggle) the checkbox film list: features
-    first sorted by popularity, then a shorts section, then a confirm bar."""
+    first sorted by weighted rating (Bayesian vote average, favors
+    well-established films over trending-but-thin-data ones), then a shorts
+    section, then a confirm bar. The rating is shown next to each title so
+    the ordering is self-explanatory."""
     requests_state = load_requests()
     entry = requests_state.get("pending_regista", {}).get(f"films:{film_hash}")
     if not entry:
@@ -4889,7 +4913,8 @@ def _render_regista_page(film_hash, progress_msg_id=None):
     def _row(f):
         mark = "✅" if f["tmdb_id"] in selected else "⬜"
         ryear = f" ({f['year']})" if f["year"] else ""
-        label = f"{mark} {f['title']}{ryear}"[:80]
+        rating = f" ⭐{f['vote_average']:.1f} ({f['vote_count']})" if f.get("vote_count") else ""
+        label = f"{mark} {f['title']}{ryear}{rating}"[:80]
         return [{"text": label, "callback_data": f"regista_toggle:{film_hash}:{f['tmdb_id']}"}]
 
     if features:
