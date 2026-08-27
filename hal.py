@@ -637,6 +637,76 @@ def tmdb_iso1_to_code(iso1):
     return _TMDB_ISO1_TO_CODE.get(iso1.lower())
 
 
+def tmdb_search_person(query, limit=5):
+    """Search TMDb for a director/person. Returns a list of
+    {person_id, name, known_for, profile_url} used by /regista to
+    disambiguate same-named directors."""
+    if not TMDB_API_KEY or not query:
+        return []
+    params = {"api_key": TMDB_API_KEY, "query": query, "include_adult": "false"}
+    url = f"{TMDB_API_URL}/search/person?{urllib.parse.urlencode(params)}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        log.warning(f"  TMDb person search error: {e}")
+        return []
+    out = []
+    for r in (data.get("results") or [])[:limit]:
+        person_id = r.get("id")
+        if not person_id:
+            continue
+        known_for = ", ".join(
+            k.get("title") or k.get("name") or "" for k in (r.get("known_for") or [])
+        ).strip(", ")
+        profile = r.get("profile_path")
+        out.append({
+            "person_id": person_id,
+            "name": r.get("name") or "?",
+            "known_for": known_for,
+            "profile_url": f"https://image.tmdb.org/t/p/w185{profile}" if profile else None,
+        })
+    return out
+
+
+def tmdb_get_director_filmography(person_id):
+    """Fetch every film this person directed via TMDb `movie_credits`,
+    filtering crew entries to job == 'Director'. Returns a list of
+    {tmdb_id, title, year, popularity, original_language} sorted by
+    popularity descending (TMDb's own metric, no extra API calls needed).
+    Runtime is NOT included here — /regista fetches it lazily per-title
+    only for the candidates actually shown, to avoid N detail calls upfront."""
+    if not TMDB_API_KEY or not person_id:
+        return []
+    url = f"{TMDB_API_URL}/person/{person_id}/movie_credits?api_key={TMDB_API_KEY}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        log.warning(f"  TMDb movie_credits error for person {person_id}: {e}")
+        return []
+    out = []
+    seen_ids = set()
+    for c in data.get("crew") or []:
+        if (c.get("job") or "") != "Director":
+            continue
+        tmdb_id = c.get("id")
+        if not tmdb_id or tmdb_id in seen_ids:
+            continue
+        seen_ids.add(tmdb_id)
+        rel_date = c.get("release_date") or ""
+        ryear = int(rel_date[:4]) if rel_date[:4].isdigit() else None
+        out.append({
+            "tmdb_id": tmdb_id,
+            "title": c.get("title") or c.get("original_title") or "?",
+            "year": ryear,
+            "popularity": c.get("popularity") or 0,
+            "original_language": c.get("original_language"),
+        })
+    out.sort(key=lambda m: m["popularity"], reverse=True)
+    return out
+
+
 def verify_audio_language(video_path, required_code):
     """Return True iff the video file's audio streams contain a track matching
     `required_code` (a 3-letter ISO code from LANGUAGE_REGISTRY). Inspects both
@@ -4716,6 +4786,174 @@ def do_scarica_search(query, progress_msg_id=None, lang=None, lang_source=None):
         tg_send(body, reply_markup={"inline_keyboard": rows})
 
 
+_SHORT_FILM_RUNTIME_MAX = 40  # minutes — TMDb has no explicit "is short" flag
+
+
+def do_regista_search(query, progress_msg_id=None):
+    """Step 1: search TMDb for a director. If exactly one match, skip straight
+    to the filmography; otherwise show disambiguation buttons (same pattern
+    as /scarica's film picker)."""
+    if not TMDB_API_KEY:
+        msg = "❌ TMDB_API_KEY non configurato — serve per cercare il regista."
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    people = tmdb_search_person(query, limit=5)
+    if not people:
+        msg = f"❌ Nessun regista trovato per '<b>{query}</b>'."
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    if len(people) == 1:
+        do_regista_filmography(people[0]["person_id"], people[0]["name"], progress_msg_id=progress_msg_id)
+        return
+
+    person_hash = str(abs(hash(("regista", tuple(p["person_id"] for p in people)))))[:8]
+    requests_state = load_requests()
+    pending = requests_state.setdefault("pending_regista", {})
+    pending[f"people:{person_hash}"] = {"people": people, "ts": datetime.now().isoformat()}
+    save_requests(requests_state)
+
+    rows = []
+    for p in people:
+        known = f" ({p['known_for']})" if p["known_for"] else ""
+        label = f"🎬 {p['name']}{known}"[:80]
+        rows.append([{"text": label, "callback_data": f"regista_pick:{person_hash}:{p['person_id']}"}])
+    rows.append([{"text": "❌ Annulla", "callback_data": f"regista_cancel:{person_hash}"}])
+
+    body = f"🔎 Trovati {len(people)} registi per '<b>{query}</b>'. Quale?"
+    if progress_msg_id:
+        tg_edit_message(progress_msg_id, body, reply_markup={"inline_keyboard": rows})
+    else:
+        tg_send(body, reply_markup={"inline_keyboard": rows})
+
+
+def do_regista_filmography(person_id, person_name, progress_msg_id=None):
+    """Step 2: fetch the full director filmography, split into features vs
+    shorts (via a runtime lookup done only for these already-narrowed
+    candidates), and render the checkbox multi-select keyboard."""
+    if progress_msg_id:
+        tg_edit_message(progress_msg_id, f"🔎 Recupero filmografia di <b>{html.escape(person_name)}</b>…")
+
+    films = tmdb_get_director_filmography(person_id)
+    if not films:
+        msg = f"❌ Nessun film trovato per <b>{html.escape(person_name)}</b> come regista."
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, msg)
+        else:
+            tg_send(msg)
+        return
+
+    for f in films:
+        f["runtime_min"] = tmdb_get_movie_details(f["tmdb_id"]).get("runtime_min")
+
+    film_hash = str(abs(hash(("regista_films", person_id))))[:8]
+    requests_state = load_requests()
+    pending = requests_state.setdefault("pending_regista", {})
+    pending[f"films:{film_hash}"] = {
+        "person_id": person_id,
+        "person_name": person_name,
+        "films": films,
+        "selected": [],
+        "ts": datetime.now().isoformat(),
+    }
+    pending.pop(f"people:{film_hash}", None)
+    save_requests(requests_state)
+
+    _render_regista_page(film_hash, progress_msg_id=progress_msg_id)
+
+
+def _render_regista_page(film_hash, progress_msg_id=None):
+    """Render (or re-render, after a toggle) the checkbox film list: features
+    first sorted by popularity, then a shorts section, then a confirm bar."""
+    requests_state = load_requests()
+    entry = requests_state.get("pending_regista", {}).get(f"films:{film_hash}")
+    if not entry:
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, "⚠️ Sessione scaduta. Rilancia <code>/regista</code>.")
+        return
+
+    films = entry["films"]
+    selected = set(entry.get("selected", []))
+    features = [f for f in films if not f["runtime_min"] or f["runtime_min"] > _SHORT_FILM_RUNTIME_MAX]
+    shorts = [f for f in films if f["runtime_min"] and f["runtime_min"] <= _SHORT_FILM_RUNTIME_MAX]
+
+    rows = []
+
+    def _row(f):
+        mark = "✅" if f["tmdb_id"] in selected else "⬜"
+        ryear = f" ({f['year']})" if f["year"] else ""
+        label = f"{mark} {f['title']}{ryear}"[:80]
+        return [{"text": label, "callback_data": f"regista_toggle:{film_hash}:{f['tmdb_id']}"}]
+
+    if features:
+        for f in features:
+            rows.append(_row(f))
+    if shorts:
+        rows.append([{"text": "— 🎞 Cortometraggi —", "callback_data": f"regista_noop:{film_hash}"}])
+        for f in shorts:
+            rows.append(_row(f))
+
+    all_selected = len(selected) == len(films) and films
+    toggle_all_label = "⬜ Deseleziona tutti" if all_selected else "✅ Seleziona tutti"
+    rows.append([{"text": toggle_all_label, "callback_data": f"regista_all:{film_hash}"}])
+    rows.append([{"text": f"⬇️ Scarica selezionati ({len(selected)})", "callback_data": f"regista_confirm:{film_hash}"}])
+    rows.append([{"text": "❌ Annulla", "callback_data": f"regista_cancel:{film_hash}"}])
+
+    body = (
+        f"🎬 Filmografia di <b>{html.escape(entry['person_name'])}</b> "
+        f"({len(features)} film, {len(shorts)} corti). Seleziona cosa scaricare:"
+    )
+    if progress_msg_id:
+        tg_edit_message(progress_msg_id, body, reply_markup={"inline_keyboard": rows})
+    else:
+        tg_send(body, reply_markup={"inline_keyboard": rows})
+
+
+def do_regista_confirm(film_hash, progress_msg_id=None):
+    """Step 3: batch-add every selected film to Radarr (VO language filter,
+    same as a plain /scarica per title) and hand each one off to the existing
+    single-film release flow via the download queue."""
+    requests_state = load_requests()
+    pending = requests_state.setdefault("pending_regista", {})
+    entry = pending.get(f"films:{film_hash}")
+    if not entry:
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, "⚠️ Sessione scaduta. Rilancia <code>/regista</code>.")
+        return
+
+    selected_ids = set(entry.get("selected", []))
+    if not selected_ids:
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, "⚠️ Nessun film selezionato.")
+        return
+
+    chosen = [f for f in entry["films"] if f["tmdb_id"] in selected_ids]
+    pending.pop(f"films:{film_hash}", None)
+    save_requests(requests_state)
+
+    names = ", ".join(f"{f['title']}" + (f" ({f['year']})" if f["year"] else "") for f in chosen)
+    if progress_msg_id:
+        tg_edit_message(progress_msg_id, f"⬇️ Avvio ricerca per {len(chosen)} film: {names}")
+
+    for f in chosen:
+        msg = tg_send(f"🔎 Cerco rilasci per <b>{f['title']}</b>…")
+        msg_id = msg["result"]["message_id"] if msg and msg.get("ok") else None
+        download_queue.put({
+            "type": "scarica_pick",
+            "tmdb_id": f["tmdb_id"],
+            "title": f["title"],
+            "year": f.get("year"),
+            "msg_id": msg_id,
+        })
+
+
 def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
     """Step 2: add the film to Radarr (no auto-grab) and show the release list.
     Reads the persisted `lang` / `lang_source` from the candidates entry (set
@@ -5901,6 +6139,27 @@ def _cmd_scarica(arg, state, excludes):
     })
 
 
+def _cmd_regista(arg, state, excludes):
+    if not arg:
+        tg_send(
+            "Usa: <code>/regista nome regista</code>\n"
+            "Es: <code>/regista Hayao Miyazaki</code>\n"
+            "Mostra tutta la filmografia (film + corti) per selezionare cosa scaricare in batch."
+        )
+        return
+    if not RADARR_URL or not RADARR_API_KEY:
+        tg_send("❌ Radarr non configurato — imposta RADARR_URL e RADARR_API_KEY.")
+        return
+
+    pos = queue_position()
+    result = tg_send(
+        f"🔎 Cerco <b>{html.escape(arg)}</b> su TMDb…"
+        + (f"\n⏳ Posizione {pos + 1}" if pos > 0 else "")
+    )
+    msg_id = result["result"]["message_id"] if result and result.get("ok") else None
+    download_queue.put({"type": "regista_search", "query": arg, "msg_id": msg_id})
+
+
 def _cmd_ita(arg, state, excludes):
     """Shortcut for `/scarica <arg> --lang ITA`. Strips any user-supplied
     --lang flag so the alias semantics are unambiguous."""
@@ -6063,6 +6322,9 @@ COMMANDS = [
     {"canonical": "/ita", "aliases": [], "handler": _cmd_ita,
      "group": "Cerca & scarica", "args": "<nome [anno]>",
      "desc": "Scorciatoia per /scarica con --lang ITA"},
+    {"canonical": "/regista", "aliases": ["/director"], "handler": _cmd_regista,
+     "group": "Cerca & scarica", "args": "<nome regista>",
+     "desc": "Filmografia completa (film + corti, ordinati per popolarità): seleziona e scarica in batch via Radarr"},
 
     # Sub management
     {"canonical": "/sincronizza", "aliases": ["/sync"], "handler": _cmd_sincronizza,
@@ -6371,6 +6633,90 @@ def process_callbacks(state, excludes):
                             f"{lang_line}"
                             f"Ti avviso quando arriva il file + sub ITA."
                         )
+                    continue
+
+                continue
+
+            # /regista callbacks: person pick, film toggle, confirm batch, cancel, noop (section header).
+            if action in ("regista_pick", "regista_toggle", "regista_all", "regista_confirm", "regista_cancel", "regista_noop"):
+                _, _, rest = data.partition(":")
+                pieces = rest.split(":")
+                film_hash = pieces[0] if pieces else ""
+
+                if action == "regista_noop":
+                    tg_answer_callback(cb_id, "")
+                    continue
+
+                if action == "regista_cancel":
+                    tg_answer_callback(cb_id, "❌ Annullato")
+                    if msg_id:
+                        tg_edit_message(msg_id, "❌ Richiesta annullata.")
+                    rs = load_requests()
+                    pending = rs.setdefault("pending_regista", {})
+                    pending.pop(f"people:{film_hash}", None)
+                    pending.pop(f"films:{film_hash}", None)
+                    save_requests(rs)
+                    continue
+
+                if action == "regista_pick" and len(pieces) >= 2:
+                    try:
+                        person_id = int(pieces[1])
+                    except ValueError:
+                        tg_answer_callback(cb_id, "⚠️ Errore")
+                        continue
+                    rs = load_requests()
+                    entry = rs.get("pending_regista", {}).get(f"people:{film_hash}")
+                    name = "?"
+                    if entry:
+                        for p in entry.get("people", []):
+                            if p["person_id"] == person_id:
+                                name = p["name"]
+                                break
+                    tg_answer_callback(cb_id, "🔎 Recupero filmografia...")
+                    do_regista_filmography(person_id, name, progress_msg_id=msg_id)
+                    continue
+
+                if action == "regista_toggle" and len(pieces) >= 2:
+                    try:
+                        tmdb_id = int(pieces[1])
+                    except ValueError:
+                        tg_answer_callback(cb_id, "⚠️ Errore")
+                        continue
+                    rs = load_requests()
+                    pending = rs.setdefault("pending_regista", {})
+                    entry = pending.get(f"films:{film_hash}")
+                    if not entry:
+                        tg_answer_callback(cb_id, "⚠️ Sessione scaduta")
+                        continue
+                    selected = set(entry.get("selected", []))
+                    if tmdb_id in selected:
+                        selected.discard(tmdb_id)
+                    else:
+                        selected.add(tmdb_id)
+                    entry["selected"] = list(selected)
+                    save_requests(rs)
+                    tg_answer_callback(cb_id, "")
+                    _render_regista_page(film_hash, progress_msg_id=msg_id)
+                    continue
+
+                if action == "regista_all":
+                    rs = load_requests()
+                    pending = rs.setdefault("pending_regista", {})
+                    entry = pending.get(f"films:{film_hash}")
+                    if not entry:
+                        tg_answer_callback(cb_id, "⚠️ Sessione scaduta")
+                        continue
+                    films = entry["films"]
+                    all_selected = len(entry.get("selected", [])) == len(films) and films
+                    entry["selected"] = [] if all_selected else [f["tmdb_id"] for f in films]
+                    save_requests(rs)
+                    tg_answer_callback(cb_id, "")
+                    _render_regista_page(film_hash, progress_msg_id=msg_id)
+                    continue
+
+                if action == "regista_confirm":
+                    tg_answer_callback(cb_id, "⬇️ Avvio")
+                    do_regista_confirm(film_hash, progress_msg_id=msg_id)
                     continue
 
                 continue
@@ -7535,6 +7881,11 @@ def _queue_worker(state_ref):
                 msg_id = job.get("msg_id")
                 log.info(f"  Queue: retranslate '{query}'")
                 do_retranslate(query, state, progress_msg_id=msg_id)
+            elif job_type == "regista_search":
+                query = job["query"]
+                msg_id = job.get("msg_id")
+                log.info(f"  Queue: regista_search '{query}'")
+                do_regista_search(query, progress_msg_id=msg_id)
             elif job_type == "scarica":
                 query = job["query"]
                 msg_id = job.get("msg_id")
@@ -7542,6 +7893,12 @@ def _queue_worker(state_ref):
                 lang_source = job.get("lang_source")
                 log.info(f"  Queue: scarica '{query}' lang={lang} source={lang_source}")
                 do_scarica_search(query, progress_msg_id=msg_id, lang=lang, lang_source=lang_source)
+            elif job_type == "scarica_pick":
+                tmdb_id = job["tmdb_id"]
+                msg_id = job.get("msg_id")
+                film_hash = str(abs(hash(("scarica", (tmdb_id,)))))[:8]
+                log.info(f"  Queue: scarica_pick tmdb_id={tmdb_id} ({job.get('title')})")
+                do_scarica_releases(film_hash, tmdb_id, progress_msg_id=msg_id)
             elif job_type == "cerca_search":
                 query = job["query"]
                 msg_id = job.get("msg_id")

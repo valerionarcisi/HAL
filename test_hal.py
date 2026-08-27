@@ -5118,5 +5118,47 @@ class TestScaricaSearchShowsDirector(unittest.TestCase):
         self.assertTrue(any("Some Director" in l for l in labels))
 
 
+class TestRegistaFilmography(unittest.TestCase):
+    """/regista splits features vs shorts by runtime and keeps TMDb's
+    popularity ordering within each section."""
+
+    def setUp(self):
+        self._orig = {k: getattr(hal, k) for k in
+                      ["TMDB_API_KEY", "tmdb_get_director_filmography",
+                       "tmdb_get_movie_details", "tg_send", "tg_edit_message",
+                       "load_requests", "save_requests"]}
+        hal.TMDB_API_KEY = "key"
+        hal.tmdb_get_director_filmography = lambda person_id: [
+            {"tmdb_id": 2, "title": "Cult Classic", "year": 2015, "popularity": 80, "original_language": "en"},
+            {"tmdb_id": 1, "title": "Big Hit", "year": 2020, "popularity": 50, "original_language": "en"},
+            {"tmdb_id": 3, "title": "Tiny Short", "year": 2018, "popularity": 10, "original_language": "en"},
+        ]
+        runtimes = {1: 110, 2: 95, 3: 15}
+        hal.tmdb_get_movie_details = lambda tmdb_id: {"runtime_min": runtimes[tmdb_id], "director": None}
+        self.sent = []
+        hal.tg_send = lambda t, **k: (self.sent.append((t, k)),
+                                      {"ok": True, "result": {"message_id": 1}})[1]
+        hal.tg_edit_message = lambda mid, t, **k: self.sent.append((t, k))
+        self.saved = {}
+        hal.load_requests = lambda: self.saved
+        hal.save_requests = lambda r: self.saved.update(r)
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(hal, k, v)
+
+    def test_shorts_split_and_sorted_by_popularity(self):
+        hal.do_regista_filmography(person_id=1, person_name="Some Director")
+        _, kwargs = self.sent[-1]
+        labels = [row[0]["text"] for row in kwargs["reply_markup"]["inline_keyboard"]]
+        cult_idx = next(i for i, l in enumerate(labels) if "Cult Classic" in l)
+        big_idx = next(i for i, l in enumerate(labels) if "Big Hit" in l)
+        shorts_header_idx = next(i for i, l in enumerate(labels) if "Cortometraggi" in l)
+        tiny_idx = next(i for i, l in enumerate(labels) if "Tiny Short" in l)
+        self.assertLess(cult_idx, big_idx)  # higher popularity (80 > 50) comes first
+        self.assertLess(big_idx, shorts_header_idx)  # features before the shorts section
+        self.assertLess(shorts_header_idx, tiny_idx)
+
+
 if __name__ == "__main__":
     unittest.main()

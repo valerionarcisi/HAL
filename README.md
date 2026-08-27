@@ -111,6 +111,7 @@ The canonical command names are in Italian (the bot speaks Italian), and each on
 | `/cerca <title [year]>` | `/search`, `/find` | Multi-source film download. Searches archive.org and YouTube in parallel, lets you pick the best result, downloads it, remuxes to MKV and installs it under `/media/films/<Title (Year)>/`. Useful for films that don't show up on the configured Radarr indexers. |
 | `/scarica <name [year]> [--lang CODE]` | `/download`, `/req` | Request a new film via Radarr — TMDb disambiguates, then you pick the release (quality, size, language, indexer) from an inline list. Optional `--lang CODE` filters the release list (e.g. `/scarica Akira --lang JPN`, `/scarica Punch-Drunk Love --lang ITA`). Without `--lang`, defaults to the film's original language from TMDb. Codes: `ITA`, `ENG`, `JPN`, `KOR`, `FRA`, `GER`, `SPA`, `CHI`, `RUS` (2-letter `it`/`en`/`ja`/… and full names also work). Multi-track releases (`MULTI`, `Dual.Audio.JP-EN`) pass the filter and are verified post-grab via ffprobe. |
 | `/ita <name [year]>` | — | Shortcut for `/scarica ... --lang ITA`. |
+| `/regista <name>` | `/director` | Look up a director on TMDb and browse their full filmography (features and shorts, sorted by TMDb popularity), with a checkbox picker (+ "select all") to batch-request whichever titles you want via Radarr. |
 
 ### Sub management
 | Command | Aliases | Description |
