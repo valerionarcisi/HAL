@@ -5118,6 +5118,41 @@ class TestScaricaSearchShowsDirector(unittest.TestCase):
         self.assertTrue(any("Some Director" in l for l in labels))
 
 
+class TestInlineSearch(unittest.TestCase):
+    """@HALbot <text> inline mode: combines TMDb person + movie search into
+    ready-to-fire /regista and /scarica commands."""
+
+    def setUp(self):
+        self._orig = {k: getattr(hal, k) for k in
+                      ["TMDB_API_KEY", "tmdb_search_person", "tmdb_search_movies"]}
+        hal.TMDB_API_KEY = "key"
+        hal.tmdb_search_person = lambda query, limit=5: [
+            {"person_id": 1, "name": "Julia Ducournau", "known_for": "Titane, Raw", "profile_url": None},
+        ]
+        hal.tmdb_search_movies = lambda query, year=None, limit=5: [
+            {"tmdb_id": 10, "title": "Titane", "year": 2021, "original_language": "fr", "overview": "A woman...", "poster_url": None},
+        ]
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(hal, k, v)
+
+    def test_combines_directors_and_films_with_ready_commands(self):
+        results = hal.do_inline_search("Julia")
+        director = next(r for r in results if "Ducournau" in r["title"])
+        film = next(r for r in results if "Titane" in r["title"])
+        self.assertEqual(director["input_message_content"]["message_text"], "/regista Julia Ducournau")
+        self.assertEqual(film["input_message_content"]["message_text"], "/scarica Titane 2021")
+
+    def test_empty_query_returns_nothing(self):
+        self.assertEqual(hal.do_inline_search(""), [])
+        self.assertEqual(hal.do_inline_search("a"), [])  # too short, avoid noisy 1-char TMDb calls
+
+    def test_no_api_key_returns_nothing(self):
+        hal.TMDB_API_KEY = ""
+        self.assertEqual(hal.do_inline_search("Julia"), [])
+
+
 class TestRegistaConfirmDisambiguatesSameTitle(unittest.TestCase):
     """A director can have two distinct TMDb entries sharing the same title
     (e.g. a 2017 short expanded into a 2019 feature, both called "Mother").

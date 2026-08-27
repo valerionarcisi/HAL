@@ -341,6 +341,60 @@ def tg_edit_message(message_id, text, reply_markup=None):
     return tg_request("editMessageText", payload)
 
 
+def tg_answer_inline_query(inline_query_id, results, cache_time=30):
+    """Reply to an inline query (`@HALbot <text>` typed in any chat) with a
+    list of result articles. `results` is a list of TMDb-search-shaped dicts
+    already converted via `_inline_result_article`."""
+    return tg_request("answerInlineQuery", {
+        "inline_query_id": inline_query_id,
+        "results": results,
+        "cache_time": cache_time,
+    })
+
+
+def _inline_result_article(result_id, title, description, message_text):
+    """Build one Telegram InlineQueryResultArticle. `message_text` is what
+    gets inserted as a normal chat message when the user picks this result —
+    a ready-to-send slash command, so tapping it in HAL's own chat fires the
+    command immediately, and tapping it elsewhere leaves a copyable command."""
+    return {
+        "type": "article",
+        "id": result_id,
+        "title": title[:64],
+        "description": description[:100] if description else None,
+        "input_message_content": {"message_text": message_text},
+    }
+
+
+def do_inline_search(query):
+    """Search TMDb for both directors and films matching `query`, for the
+    inline-mode (`@HALbot <text>`) autocomplete. Returns a list of
+    InlineQueryResultArticle dicts, directors first. Each result's chosen
+    message is a ready-to-send slash command (/regista or /scarica)."""
+    if not TMDB_API_KEY or not query or len(query) < 2:
+        return []
+
+    results = []
+    for p in tmdb_search_person(query, limit=5):
+        known = f" — {p['known_for']}" if p["known_for"] else ""
+        results.append(_inline_result_article(
+            f"director:{p['person_id']}",
+            f"🎬 {p['name']}",
+            f"Regista{known}",
+            f"/regista {p['name']}",
+        ))
+    for c in tmdb_search_movies(query, limit=5):
+        ryear = f" ({c['year']})" if c["year"] else ""
+        lang = (c["original_language"] or "?").upper()
+        results.append(_inline_result_article(
+            f"film:{c['tmdb_id']}",
+            f"🎞 {c['title']}{ryear}",
+            f"Film · {lang}" + (f" — {c['overview'][:60]}" if c["overview"] else ""),
+            f"/scarica {c['title']} {c['year']}".strip() if c["year"] else f"/scarica {c['title']}",
+        ))
+    return results
+
+
 def tg_get_updates(offset=0):
     result = tg_request("getUpdates", {
         "offset": offset,
@@ -7148,6 +7202,13 @@ def process_callbacks(state, excludes):
 
                 if msg_id:
                     tg_edit_message(msg_id, f"🚫 <b>{folder}</b> esclusa dalla ricerca sub ITA.\nPer rimuoverla, modifica /config/exclude_folders.txt")
+
+        # Handle inline queries (`@HALbot <text>` typed in any chat).
+        iq = update.get("inline_query")
+        if iq:
+            results = do_inline_search(iq.get("query", "").strip())
+            tg_answer_inline_query(iq["id"], results)
+            continue
 
         # Handle text commands
         msg = update.get("message")

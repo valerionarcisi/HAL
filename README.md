@@ -104,6 +104,9 @@ docker compose up -d --build hal
 
 The canonical command names are in Italian (the bot speaks Italian), and each one accepts English aliases plus short forms. Examples below show canonical + aliases.
 
+### Inline mode (autocomplete-as-you-type)
+Type `@<bot_username> <text>` in **any** Telegram chat (not just HAL's own) to get live suggestions from TMDb — directors first, then films. Tapping a result inserts a ready-to-fire command (`/regista <name>` or `/scarica <title> <year>`); sent to HAL it runs immediately, sent anywhere else it's just a copyable command. Requires inline mode enabled once via [@BotFather](https://t.me/BotFather) → `/setinline`.
+
 ### Search & download
 | Command | Aliases | Description |
 |---|---|---|
