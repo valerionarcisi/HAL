@@ -5249,6 +5249,20 @@ class TestRegistaFilmography(unittest.TestCase):
         self.assertIn("110min", labels[big_idx])
         self.assertIn("15min", labels[tiny_idx])
 
+    def test_placeholder_tmdb_entries_are_dropped(self):
+        # A real-world case: TMDb sometimes carries an entry with no year and
+        # no votes at all (empty release_date, vote_count=0) — a data-entry
+        # artifact, not a real findable release.
+        hal.tmdb_get_director_filmography = lambda person_id: [
+            {"tmdb_id": 1, "title": "Big Hit", "year": 2020, "vote_average": 7.8, "vote_count": 5000, "original_language": "en"},
+            {"tmdb_id": 99, "title": "Ghost Entry", "year": None, "vote_average": 0, "vote_count": 0, "original_language": "en"},
+        ]
+        hal.tmdb_get_movie_details = lambda tmdb_id: {"runtime_min": 110, "director": None}
+        hal.do_regista_filmography(person_id=1, person_name="Some Director")
+        _, kwargs = self.sent[-1]
+        labels = [row[0]["text"] for row in kwargs["reply_markup"]["inline_keyboard"]]
+        self.assertFalse(any("Ghost Entry" in l for l in labels))
+
     def test_select_all_films_and_select_all_shorts_are_independent(self):
         hal.do_regista_filmography(person_id=1, person_name="Some Director")
         film_hash = next(k.split(":", 1)[1] for k in self.saved["pending_regista"] if k.startswith("films:"))

@@ -4917,6 +4917,10 @@ def do_regista_filmography(person_id, person_name, progress_msg_id=None):
         tg_edit_message(progress_msg_id, f"🔎 Recupero filmografia di <b>{html.escape(person_name)}</b>…")
 
     films = tmdb_get_director_filmography(person_id)
+    # TMDb occasionally carries placeholder/incomplete entries with no
+    # release date and no votes — almost certainly not a real, findable
+    # release. Drop them before spending a detail lookup on them.
+    films = [f for f in films if f.get("year") or f.get("vote_count")]
     if not films:
         msg = f"❌ Nessun film trovato per <b>{html.escape(person_name)}</b> come regista."
         if progress_msg_id:
