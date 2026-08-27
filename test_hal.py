@@ -5161,6 +5161,8 @@ class TestRegistaFilmography(unittest.TestCase):
         self.assertLess(shorts_header_idx, tiny_idx)
         self.assertIn("⭐7.8", labels[big_idx])  # rating shown so the order is self-explanatory
         self.assertIn("(5000)", labels[big_idx])
+        self.assertIn("110min", labels[big_idx])
+        self.assertIn("15min", labels[tiny_idx])
 
 
 class TestWeightedRating(unittest.TestCase):

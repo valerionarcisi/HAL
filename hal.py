@@ -4914,7 +4914,8 @@ def _render_regista_page(film_hash, progress_msg_id=None):
         mark = "✅" if f["tmdb_id"] in selected else "⬜"
         ryear = f" ({f['year']})" if f["year"] else ""
         rating = f" ⭐{f['vote_average']:.1f} ({f['vote_count']})" if f.get("vote_count") else ""
-        label = f"{mark} {f['title']}{ryear}{rating}"[:80]
+        runtime = f" · {f['runtime_min']}min" if f.get("runtime_min") else ""
+        label = f"{mark} {f['title']}{ryear}{rating}{runtime}"[:80]
         return [{"text": label, "callback_data": f"regista_toggle:{film_hash}:{f['tmdb_id']}"}]
 
     if features:
