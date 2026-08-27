@@ -5153,6 +5153,73 @@ class TestInlineSearch(unittest.TestCase):
         self.assertEqual(hal.do_inline_search("Julia"), [])
 
 
+class TestScaricaReleasesCercaFallback(unittest.TestCase):
+    """When Radarr's indexers return zero releases and a cerca_fallback was
+    given (only /regista's shorts pass one), do_scarica_releases falls
+    through to /cerca instead of dead-ending on 'nessun rilascio trovato' —
+    and the director hint travels all the way to the YouTube query so a
+    common-word short title doesn't match an unrelated video."""
+
+    def setUp(self):
+        self._orig = {k: getattr(hal, k) for k in
+                      ["RADARR_URL", "RADARR_API_KEY", "TMDB_API_KEY", "RadarrClient",
+                       "tg_send", "tg_edit_message", "load_requests", "save_requests",
+                       "_parallel_search_sources", "_run_prefetch_with_interlude"]}
+        hal.RADARR_URL = "http://radarr:7878"
+        hal.RADARR_API_KEY = "key"
+        hal.TMDB_API_KEY = ""  # force do_cerca_search to skip TMDb resolution
+
+        class FakeClient:
+            def lookup(self, tmdb_id):
+                return {"title": "Zapping", "year": 2000, "originalLanguage": {"name": "Romanian"}}
+
+            def find_existing(self, tmdb_id):
+                return None
+
+            def add(self, tmdb_id):
+                return 42
+
+            def releases(self, movie_id):
+                return []
+
+        hal.RadarrClient = FakeClient
+        self.sent = []
+        hal.tg_send = lambda t, **k: (self.sent.append((t, k)),
+                                      {"ok": True, "result": {"message_id": 1}})[1]
+        hal.tg_edit_message = lambda mid, t, **k: self.sent.append((t, k))
+        self.saved = {}
+        hal.load_requests = lambda: self.saved
+        hal.save_requests = lambda r: self.saved.update(r)
+
+        self.search_calls = []
+        def fake_search(title, year, director_hint=None):
+            self.search_calls.append({"title": title, "year": year, "director_hint": director_hint})
+            return [], []
+        hal._parallel_search_sources = fake_search
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(hal, k, v)
+
+    def test_falls_through_to_cerca_with_director_hint(self):
+        hal.do_scarica_releases(
+            "abc", 354211, progress_msg_id=1,
+            cerca_fallback={"query": "Zapping 2000", "director_hint": "Cristian Mungiu"},
+        )
+        self.assertEqual(len(self.search_calls), 1)
+        call = self.search_calls[0]
+        self.assertEqual(call["title"], "Zapping")
+        self.assertEqual(call["year"], 2000)
+        self.assertEqual(call["director_hint"], "Cristian Mungiu")
+
+    def test_no_fallback_shows_normal_error(self):
+        hal.do_scarica_releases("abc", 354211, progress_msg_id=1, cerca_fallback=None)
+        self.assertEqual(len(self.search_calls), 0)
+        _, kwargs = self.sent[-1] if self.sent else (None, {})
+        last_text = self.sent[-1][0]
+        self.assertIn("Nessun rilascio trovato", last_text)
+
+
 class TestRegistaConfirmDisambiguatesSameTitle(unittest.TestCase):
     """A director can have two distinct TMDb entries sharing the same title
     (e.g. a 2017 short expanded into a 2019 feature, both called "Mother").
@@ -5190,17 +5257,22 @@ class TestRegistaConfirmDisambiguatesSameTitle(unittest.TestCase):
         self.assertIn("18min", short_msg)
         self.assertIn("128min", feature_msg)
 
-    def test_short_routed_to_cerca_feature_routed_to_scarica(self):
+    def test_short_carries_cerca_fallback_feature_does_not(self):
+        # Both go through scarica_pick (Radarr first); only the short carries
+        # a cerca_fallback for when Radarr's indexers come back empty.
         hal.do_regista_confirm("abc")
         jobs = []
         while not hal.download_queue.empty():
             jobs.append(hal.download_queue.get_nowait())
-        short_job = next(j for j in jobs if j.get("tmdb_id") != 2 and j["type"] != "scarica_pick")
-        feature_job = next(j for j in jobs if j["type"] == "scarica_pick")
-        self.assertEqual(short_job["type"], "cerca_search")
-        self.assertIn("Mother", short_job["query"])
-        self.assertIn("2017", short_job["query"])
-        self.assertEqual(feature_job["tmdb_id"], 2)
+        short_job = next(j for j in jobs if j["tmdb_id"] == 1)
+        feature_job = next(j for j in jobs if j["tmdb_id"] == 2)
+        self.assertEqual(short_job["type"], "scarica_pick")
+        self.assertEqual(feature_job["type"], "scarica_pick")
+        self.assertIn("cerca_fallback", short_job)
+        self.assertIn("Mother", short_job["cerca_fallback"]["query"])
+        self.assertIn("2017", short_job["cerca_fallback"]["query"])
+        self.assertEqual(short_job["cerca_fallback"]["director_hint"], "Some Director")
+        self.assertNotIn("cerca_fallback", feature_job)
 
 
 class TestRegistaFilmography(unittest.TestCase):

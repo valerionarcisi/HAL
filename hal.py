@@ -5006,11 +5006,13 @@ def _render_regista_page(film_hash, progress_msg_id=None):
 
 
 def do_regista_confirm(film_hash, progress_msg_id=None):
-    """Step 3: batch-request every selected title. Features go to Radarr (VO
-    language filter, same as a plain /scarica per title) via the existing
-    single-film release flow. Shorts almost never have torrent indexer
-    releases, so they're routed to /cerca's archive.org+YouTube search
-    instead — same download queue, different job type per title."""
+    """Step 3: batch-request every selected title through Radarr (VO language
+    filter, same as a plain /scarica per title) via the single-film release
+    flow. Shorts almost never have torrent indexer releases, so they carry a
+    `cerca_fallback` — if Radarr's indexers come back empty, the flow falls
+    through transparently to /cerca's archive.org+YouTube search, with the
+    director name appended to the YouTube query so a common-word short title
+    (e.g. "Zapping") doesn't match an unrelated video sharing that word."""
     requests_state = load_requests()
     pending = requests_state.setdefault("pending_regista", {})
     entry = pending.get(f"films:{film_hash}")
@@ -5037,32 +5039,43 @@ def do_regista_confirm(film_hash, progress_msg_id=None):
         label = f["title"] + (f" ({f['year']})" if f.get("year") else "")
         runtime_hint = f" · {f['runtime_min']}min" if f.get("runtime_min") else ""
         is_short = f.get("runtime_min") and f["runtime_min"] <= _SHORT_FILM_RUNTIME_MAX
+        msg = tg_send(f"🔎 Cerco rilasci per <b>{label}</b>{runtime_hint}…")
+        msg_id = msg["result"]["message_id"] if msg and msg.get("ok") else None
+        job = {
+            "type": "scarica_pick",
+            "tmdb_id": f["tmdb_id"],
+            "title": f["title"],
+            "year": f.get("year"),
+            "msg_id": msg_id,
+        }
         if is_short:
-            msg = tg_send(f"🔎 Cerco <b>{label}</b>{runtime_hint} su archive.org e YouTube…")
-            msg_id = msg["result"]["message_id"] if msg and msg.get("ok") else None
             query = f["title"] + (f" {f['year']}" if f.get("year") else "")
-            download_queue.put({
-                "type": "cerca_search",
-                "query": query,
-                "msg_id": msg_id,
-            })
-        else:
-            msg = tg_send(f"🔎 Cerco rilasci per <b>{label}</b>{runtime_hint}…")
-            msg_id = msg["result"]["message_id"] if msg and msg.get("ok") else None
-            download_queue.put({
-                "type": "scarica_pick",
-                "tmdb_id": f["tmdb_id"],
-                "title": f["title"],
-                "year": f.get("year"),
-                "msg_id": msg_id,
-            })
+            job["cerca_fallback"] = {"query": query, "director_hint": entry["person_name"]}
+        download_queue.put(job)
 
 
-def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
+def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None, cerca_fallback=None):
     """Step 2: add the film to Radarr (no auto-grab) and show the release list.
     Reads the persisted `lang` / `lang_source` from the candidates entry (set
     at step 1 by `do_scarica_search`); when `lang` is None, defaults to the
-    film's TMDb original language and labels the source as "VO from TMDb"."""
+    film's TMDb original language and labels the source as "VO from TMDb".
+
+    `cerca_fallback`, when given, is a {"query": str, "director_hint": str}
+    dict used ONLY when Radarr can't produce a release (add failure, search
+    failure, or zero releases — all common for shorts, which torrent
+    trackers rarely carry) — instead of stopping at an error message, we
+    transparently fall through to /cerca's archive.org+YouTube search. Not
+    used for a plain /scarica."""
+
+    def _fall_through_to_cerca(warning):
+        if progress_msg_id:
+            tg_edit_message(progress_msg_id, f"{warning}\n🔎 Provo su archive.org e YouTube…")
+        do_cerca_search(
+            cerca_fallback["query"],
+            progress_msg_id=progress_msg_id,
+            director_hint=cerca_fallback.get("director_hint"),
+        )
+
     client = RadarrClient()
     requests_state = load_requests()
     pending = requests_state.setdefault("pending_radarr", {})
@@ -5151,6 +5164,9 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
             body = e.read().decode("utf-8", errors="ignore")
         except Exception:
             pass
+        if cerca_fallback:
+            _fall_through_to_cerca(f"⚠️ Radarr non ha accettato <b>{title_label}</b> (HTTP {e.code}).")
+            return
         msg = f"❌ Radarr add HTTP {e.code}: {body[:200]}"
         if progress_msg_id:
             tg_edit_message(progress_msg_id, msg)
@@ -5158,6 +5174,9 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
             tg_send(msg)
         return
     except Exception as e:
+        if cerca_fallback:
+            _fall_through_to_cerca(f"⚠️ Errore Radarr per <b>{title_label}</b>.")
+            return
         msg = f"❌ Errore aggiunta in Radarr: {e}"
         if progress_msg_id:
             tg_edit_message(progress_msg_id, msg)
@@ -5168,6 +5187,9 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
     try:
         releases = client.releases(movie_id)
     except Exception as e:
+        if cerca_fallback:
+            _fall_through_to_cerca(f"⚠️ Errore ricerca rilasci per <b>{title_label}</b>.")
+            return
         msg = f"❌ Errore Interactive Search: {e}"
         if progress_msg_id:
             tg_edit_message(progress_msg_id, msg)
@@ -5176,6 +5198,9 @@ def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
         return
 
     if not releases:
+        if cerca_fallback:
+            _fall_through_to_cerca(f"⚠️ Nessun rilascio per <b>{title_label}</b> sugli indexer.")
+            return
         msg = (
             f"⚠️ Nessun rilascio trovato per <b>{title_label}</b> sugli indexer configurati.\n"
             f"Riprova più tardi o controlla i profile in Radarr."
@@ -5519,16 +5544,23 @@ def _cerca_film_hash(film_dict):
     return str(abs(hash(("cerca", film_dict.get("tmdb_id"), film_dict.get("title"), film_dict.get("year")))))[:8]
 
 
-def _parallel_search_sources(title, year):
+def _parallel_search_sources(title, year, director_hint=None):
     """Run archive.org + YouTube searches in parallel. Both calls degrade to
     [] on error; never raises. YouTube results have their real resolution
     discovered via a follow-up `yt-dlp --skip-download --print` per top-N
     candidate (the flat-playlist search does not return height). Returns
-    (archive_results, youtube_results)."""
+    (archive_results, youtube_results).
+
+    `director_hint` is appended only to the YouTube free-text query, never to
+    archive.org's — archive.org matches `title:("...")` as an exact-phrase
+    field query, so appending extra words there would break matching instead
+    of narrowing it. YouTube's plain-text search benefits from the extra
+    disambiguation when the title is a common word (e.g. "Zapping")."""
     query = f"{title} {year}".strip() if year else title
+    youtube_query = f"{query} {director_hint}".strip() if director_hint else query
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_archive = pool.submit(search_archive_org, title, year, CERCA_RESULT_LIMIT_PER_SOURCE)
-        f_youtube = pool.submit(search_youtube, query, CERCA_RESULT_LIMIT_PER_SOURCE)
+        f_youtube = pool.submit(search_youtube, youtube_query, CERCA_RESULT_LIMIT_PER_SOURCE)
         archive_results = []
         youtube_results = []
         for fut in as_completed([f_archive, f_youtube]):
@@ -5599,10 +5631,16 @@ def _format_cerca_button(result):
     return label[:80]
 
 
-def do_cerca_search(query, progress_msg_id=None):
+def do_cerca_search(query, progress_msg_id=None, director_hint=None):
     """Step 1: resolve the title via TMDb (when available), then trigger a
     parallel search on archive.org + YouTube. Surfaces the consolidated list as
-    inline buttons so the user can pick one."""
+    inline buttons so the user can pick one.
+
+    `director_hint` (optional) is appended to the search query only — never
+    to the canonical title/label — so a generic-word title like "Zapping"
+    doesn't match an unrelated video sharing that word. Used by /regista when
+    routing a director's short to this search engine, where title collisions
+    with common words are common."""
     title, year = _parse_cerca_query(query)
     if not title:
         msg = "❌ Titolo mancante. Usa <code>/cerca titolo film [anno]</code>."
@@ -5632,6 +5670,11 @@ def do_cerca_search(query, progress_msg_id=None):
         details = tmdb_get_movie_details(tmdb_id)
         director = details.get("director")
         tmdb_runtime_min = details.get("runtime_min")
+    # A caller (e.g. /regista, which already knows the director) can pass one
+    # explicitly — this covers the common case where the title is too
+    # obscure for TMDb search to resolve at all (candidates empty above), so
+    # `director` from the detail lookup never gets a chance to help.
+    effective_director_hint = director or director_hint
 
     label = canonical_title + (f" ({canonical_year})" if canonical_year else "")
     if progress_msg_id:
@@ -5640,7 +5683,9 @@ def do_cerca_search(query, progress_msg_id=None):
             f"🔎 Cerco <b>{html.escape(label)}</b> su archive.org e YouTube…"
         )
 
-    archive_results, youtube_results = _parallel_search_sources(canonical_title, canonical_year)
+    archive_results, youtube_results = _parallel_search_sources(
+        canonical_title, canonical_year, director_hint=effective_director_hint
+    )
     youtube_results = _annotate_youtube_quality(youtube_results)
 
     if not archive_results and not youtube_results:
@@ -8018,14 +8063,16 @@ def _queue_worker(state_ref):
             elif job_type == "scarica_pick":
                 tmdb_id = job["tmdb_id"]
                 msg_id = job.get("msg_id")
+                cerca_fallback = job.get("cerca_fallback")
                 film_hash = str(abs(hash(("scarica", (tmdb_id,)))))[:8]
-                log.info(f"  Queue: scarica_pick tmdb_id={tmdb_id} ({job.get('title')})")
-                do_scarica_releases(film_hash, tmdb_id, progress_msg_id=msg_id)
+                log.info(f"  Queue: scarica_pick tmdb_id={tmdb_id} ({job.get('title')}) fallback={bool(cerca_fallback)}")
+                do_scarica_releases(film_hash, tmdb_id, progress_msg_id=msg_id, cerca_fallback=cerca_fallback)
             elif job_type == "cerca_search":
                 query = job["query"]
                 msg_id = job.get("msg_id")
-                log.info(f"  Queue: cerca_search '{query}'")
-                do_cerca_search(query, progress_msg_id=msg_id)
+                director_hint = job.get("director_hint")
+                log.info(f"  Queue: cerca_search '{query}' director_hint={director_hint}")
+                do_cerca_search(query, progress_msg_id=msg_id, director_hint=director_hint)
             elif job_type == "cerca_download":
                 film_hash = job["film_hash"]
                 result_idx = job["result_idx"]
