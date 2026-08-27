@@ -4918,17 +4918,22 @@ def _render_regista_page(film_hash, progress_msg_id=None):
         label = f"{mark} {f['title']}{ryear}{rating}{runtime}"[:80]
         return [{"text": label, "callback_data": f"regista_toggle:{film_hash}:{f['tmdb_id']}"}]
 
+    def _toggle_all_row(group, group_key, group_label):
+        group_ids = {f["tmdb_id"] for f in group}
+        all_selected = bool(group_ids) and group_ids <= selected
+        label = f"⬜ Deseleziona tutti i {group_label}" if all_selected else f"✅ Seleziona tutti i {group_label}"
+        return [{"text": label, "callback_data": f"regista_all:{film_hash}:{group_key}"}]
+
     if features:
         for f in features:
             rows.append(_row(f))
+        rows.append(_toggle_all_row(features, "features", "film"))
     if shorts:
         rows.append([{"text": "— 🎞 Cortometraggi —", "callback_data": f"regista_noop:{film_hash}"}])
         for f in shorts:
             rows.append(_row(f))
+        rows.append(_toggle_all_row(shorts, "shorts", "corti"))
 
-    all_selected = len(selected) == len(films) and films
-    toggle_all_label = "⬜ Deseleziona tutti" if all_selected else "✅ Seleziona tutti"
-    rows.append([{"text": toggle_all_label, "callback_data": f"regista_all:{film_hash}"}])
     rows.append([{"text": f"⬇️ Scarica selezionati ({len(selected)})", "callback_data": f"regista_confirm:{film_hash}"}])
     rows.append([{"text": "❌ Annulla", "callback_data": f"regista_cancel:{film_hash}"}])
 
@@ -6727,7 +6732,8 @@ def process_callbacks(state, excludes):
                     _render_regista_page(film_hash, progress_msg_id=msg_id)
                     continue
 
-                if action == "regista_all":
+                if action == "regista_all" and len(pieces) >= 2:
+                    group_key = pieces[1]
                     rs = load_requests()
                     pending = rs.setdefault("pending_regista", {})
                     entry = pending.get(f"films:{film_hash}")
@@ -6735,8 +6741,18 @@ def process_callbacks(state, excludes):
                         tg_answer_callback(cb_id, "⚠️ Sessione scaduta")
                         continue
                     films = entry["films"]
-                    all_selected = len(entry.get("selected", [])) == len(films) and films
-                    entry["selected"] = [] if all_selected else [f["tmdb_id"] for f in films]
+                    if group_key == "shorts":
+                        group = [f for f in films if f["runtime_min"] and f["runtime_min"] <= _SHORT_FILM_RUNTIME_MAX]
+                    else:
+                        group = [f for f in films if not f["runtime_min"] or f["runtime_min"] > _SHORT_FILM_RUNTIME_MAX]
+                    group_ids = {f["tmdb_id"] for f in group}
+                    selected = set(entry.get("selected", []))
+                    all_selected = bool(group_ids) and group_ids <= selected
+                    if all_selected:
+                        selected -= group_ids
+                    else:
+                        selected |= group_ids
+                    entry["selected"] = list(selected)
                     save_requests(rs)
                     tg_answer_callback(cb_id, "")
                     _render_regista_page(film_hash, progress_msg_id=msg_id)

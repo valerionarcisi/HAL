@@ -5202,6 +5202,26 @@ class TestRegistaFilmography(unittest.TestCase):
         self.assertIn("110min", labels[big_idx])
         self.assertIn("15min", labels[tiny_idx])
 
+    def test_select_all_films_and_select_all_shorts_are_independent(self):
+        hal.do_regista_filmography(person_id=1, person_name="Some Director")
+        film_hash = next(k.split(":", 1)[1] for k in self.saved["pending_regista"] if k.startswith("films:"))
+
+        _, kwargs = self.sent[-1]
+        rows = kwargs["reply_markup"]["inline_keyboard"]
+        films_all_cb = next(r[0]["callback_data"] for r in rows if "Seleziona tutti i film" in r[0]["text"])
+        shorts_all_cb = next(r[0]["callback_data"] for r in rows if "Seleziona tutti i corti" in r[0]["text"])
+        self.assertEqual(films_all_cb, f"regista_all:{film_hash}:features")
+        self.assertEqual(shorts_all_cb, f"regista_all:{film_hash}:shorts")
+
+        # Selecting all films must not touch the shorts.
+        entry = self.saved["pending_regista"][f"films:{film_hash}"]
+        entry["selected"] = [1, 2]  # both features selected, no shorts
+        hal._render_regista_page(film_hash)
+        _, kwargs = self.sent[-1]
+        rows = kwargs["reply_markup"]["inline_keyboard"]
+        toggle_label = next(r[0]["text"] for r in rows if "Seleziona tutti i corti" in r[0]["text"] or "Deseleziona tutti i corti" in r[0]["text"])
+        self.assertIn("✅ Seleziona tutti i corti", toggle_label)  # shorts still unselected
+
 
 class TestWeightedRating(unittest.TestCase):
     """Bayesian weighted rating pulls low-vote-count films toward the mean,
