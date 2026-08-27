@@ -4969,7 +4969,9 @@ def do_regista_confirm(film_hash, progress_msg_id=None):
         tg_edit_message(progress_msg_id, f"⬇️ Avvio ricerca per {len(chosen)} film: {names}")
 
     for f in chosen:
-        msg = tg_send(f"🔎 Cerco rilasci per <b>{f['title']}</b>…")
+        label = f["title"] + (f" ({f['year']})" if f.get("year") else "")
+        runtime_hint = f" · {f['runtime_min']}min" if f.get("runtime_min") else ""
+        msg = tg_send(f"🔎 Cerco rilasci per <b>{label}</b>{runtime_hint}…")
         msg_id = msg["result"]["message_id"] if msg and msg.get("ok") else None
         download_queue.put({
             "type": "scarica_pick",

@@ -5118,6 +5118,44 @@ class TestScaricaSearchShowsDirector(unittest.TestCase):
         self.assertTrue(any("Some Director" in l for l in labels))
 
 
+class TestRegistaConfirmDisambiguatesSameTitle(unittest.TestCase):
+    """A director can have two distinct TMDb entries sharing the same title
+    (e.g. a 2017 short expanded into a 2019 feature, both called "Mother").
+    Each per-film 'searching releases' message must show year + runtime so
+    the two aren't indistinguishable while both sit in the download queue."""
+
+    def setUp(self):
+        self._orig = {k: getattr(hal, k) for k in
+                      ["load_requests", "save_requests", "tg_send", "tg_edit_message"]}
+        self.saved = {"pending_regista": {"films:abc": {
+            "person_id": 1, "person_name": "Some Director",
+            "films": [
+                {"tmdb_id": 1, "title": "Mother", "year": 2017, "runtime_min": 18},
+                {"tmdb_id": 2, "title": "Mother", "year": 2019, "runtime_min": 128},
+            ],
+            "selected": [1, 2],
+        }}}
+        hal.load_requests = lambda: self.saved
+        hal.save_requests = lambda r: self.saved.update(r)
+        self.sent = []
+        hal.tg_send = lambda t, **k: (self.sent.append(t),
+                                      {"ok": True, "result": {"message_id": 1}})[1]
+        hal.tg_edit_message = lambda mid, t, **k: None
+        while not hal.download_queue.empty():
+            hal.download_queue.get_nowait()
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(hal, k, v)
+
+    def test_each_queued_message_includes_year_and_runtime(self):
+        hal.do_regista_confirm("abc")
+        short_msg = next(m for m in self.sent if "2017" in m)
+        feature_msg = next(m for m in self.sent if "2019" in m)
+        self.assertIn("18min", short_msg)
+        self.assertIn("128min", feature_msg)
+
+
 class TestRegistaFilmography(unittest.TestCase):
     """/regista splits features vs shorts by runtime and keeps the
     weighted-rating ordering (Bayesian vote average) within each section."""
