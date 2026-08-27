@@ -5190,6 +5190,18 @@ class TestRegistaConfirmDisambiguatesSameTitle(unittest.TestCase):
         self.assertIn("18min", short_msg)
         self.assertIn("128min", feature_msg)
 
+    def test_short_routed_to_cerca_feature_routed_to_scarica(self):
+        hal.do_regista_confirm("abc")
+        jobs = []
+        while not hal.download_queue.empty():
+            jobs.append(hal.download_queue.get_nowait())
+        short_job = next(j for j in jobs if j.get("tmdb_id") != 2 and j["type"] != "scarica_pick")
+        feature_job = next(j for j in jobs if j["type"] == "scarica_pick")
+        self.assertEqual(short_job["type"], "cerca_search")
+        self.assertIn("Mother", short_job["query"])
+        self.assertIn("2017", short_job["query"])
+        self.assertEqual(feature_job["tmdb_id"], 2)
+
 
 class TestRegistaFilmography(unittest.TestCase):
     """/regista splits features vs shorts by runtime and keeps the

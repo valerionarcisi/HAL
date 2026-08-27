@@ -5002,9 +5002,11 @@ def _render_regista_page(film_hash, progress_msg_id=None):
 
 
 def do_regista_confirm(film_hash, progress_msg_id=None):
-    """Step 3: batch-add every selected film to Radarr (VO language filter,
-    same as a plain /scarica per title) and hand each one off to the existing
-    single-film release flow via the download queue."""
+    """Step 3: batch-request every selected title. Features go to Radarr (VO
+    language filter, same as a plain /scarica per title) via the existing
+    single-film release flow. Shorts almost never have torrent indexer
+    releases, so they're routed to /cerca's archive.org+YouTube search
+    instead — same download queue, different job type per title."""
     requests_state = load_requests()
     pending = requests_state.setdefault("pending_regista", {})
     entry = pending.get(f"films:{film_hash}")
@@ -5030,15 +5032,26 @@ def do_regista_confirm(film_hash, progress_msg_id=None):
     for f in chosen:
         label = f["title"] + (f" ({f['year']})" if f.get("year") else "")
         runtime_hint = f" · {f['runtime_min']}min" if f.get("runtime_min") else ""
-        msg = tg_send(f"🔎 Cerco rilasci per <b>{label}</b>{runtime_hint}…")
-        msg_id = msg["result"]["message_id"] if msg and msg.get("ok") else None
-        download_queue.put({
-            "type": "scarica_pick",
-            "tmdb_id": f["tmdb_id"],
-            "title": f["title"],
-            "year": f.get("year"),
-            "msg_id": msg_id,
-        })
+        is_short = f.get("runtime_min") and f["runtime_min"] <= _SHORT_FILM_RUNTIME_MAX
+        if is_short:
+            msg = tg_send(f"🔎 Cerco <b>{label}</b>{runtime_hint} su archive.org e YouTube…")
+            msg_id = msg["result"]["message_id"] if msg and msg.get("ok") else None
+            query = f["title"] + (f" {f['year']}" if f.get("year") else "")
+            download_queue.put({
+                "type": "cerca_search",
+                "query": query,
+                "msg_id": msg_id,
+            })
+        else:
+            msg = tg_send(f"🔎 Cerco rilasci per <b>{label}</b>{runtime_hint}…")
+            msg_id = msg["result"]["message_id"] if msg and msg.get("ok") else None
+            download_queue.put({
+                "type": "scarica_pick",
+                "tmdb_id": f["tmdb_id"],
+                "title": f["title"],
+                "year": f.get("year"),
+                "msg_id": msg_id,
+            })
 
 
 def do_scarica_releases(film_hash, tmdb_id, progress_msg_id=None):
