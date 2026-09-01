@@ -1823,6 +1823,178 @@ class TestBatchTranslatePersistence(unittest.TestCase):
         self.assertIn("def", loaded)
 
 
+class TestDeeplQuotaCheck(unittest.TestCase):
+    """deepl_has_quota() hits DeepL's free /v2/usage endpoint to know, before
+    committing to a translation, whether it'll actually be free."""
+
+    def setUp(self):
+        self.prev_key = hal.DEEPL_API_KEY
+        hal.DEEPL_API_KEY = "test-key"
+
+    def tearDown(self):
+        hal.DEEPL_API_KEY = self.prev_key
+
+    def test_no_key_returns_false(self):
+        hal.DEEPL_API_KEY = ""
+        self.assertFalse(hal.deepl_has_quota())
+
+    def test_quota_remaining_returns_true(self):
+        from unittest.mock import patch, MagicMock
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(
+            {"character_count": 100, "character_limit": 1_000_000}
+        ).encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: None
+        with patch("urllib.request.urlopen", return_value=resp):
+            self.assertTrue(hal.deepl_has_quota())
+
+    def test_quota_exhausted_returns_false(self):
+        from unittest.mock import patch, MagicMock
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(
+            {"character_count": 1_000_000, "character_limit": 1_000_000}
+        ).encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: None
+        with patch("urllib.request.urlopen", return_value=resp):
+            self.assertFalse(hal.deepl_has_quota())
+
+    def test_network_error_returns_none(self):
+        from unittest.mock import patch
+
+        def fake_urlopen(req, timeout=None):
+            raise OSError("connection refused")
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertIsNone(hal.deepl_has_quota())
+
+
+class TestTranslationEngineLabel(unittest.TestCase):
+    """_translation_engine_label() is what the Traduci confirmation message
+    shows the user before they commit to spending — it must always name the
+    real engine (DeepL free vs. a paid fallback), not just a generic 'ok'."""
+
+    def setUp(self):
+        self.prev_key = hal.DEEPL_API_KEY
+        self.prev_model = hal.CLAUDE_MODEL
+        self.prev_reset_day = hal.DEEPL_QUOTA_RESET_DAY
+        hal.CLAUDE_MODEL = "anthropic/claude-haiku-4.5"
+        hal.DEEPL_QUOTA_RESET_DAY = "13"
+
+    def tearDown(self):
+        hal.DEEPL_API_KEY = self.prev_key
+        hal.CLAUDE_MODEL = self.prev_model
+        hal.DEEPL_QUOTA_RESET_DAY = self.prev_reset_day
+
+    def test_no_deepl_key_names_fallback_as_paid(self):
+        from unittest.mock import patch
+        hal.DEEPL_API_KEY = ""
+        label = hal._translation_engine_label()
+        self.assertIn("claude-haiku-4.5", label)
+        self.assertIn("a pagamento", label)
+
+    def test_deepl_with_quota_is_free(self):
+        from unittest.mock import patch
+        hal.DEEPL_API_KEY = "test-key"
+        with patch.object(hal, "deepl_has_quota", return_value=True):
+            label = hal._translation_engine_label()
+        self.assertIn("DeepL", label)
+        self.assertIn("gratuito", label)
+
+    def test_deepl_quota_exhausted_shows_reset_day_and_fallback_model(self):
+        from unittest.mock import patch
+        hal.DEEPL_API_KEY = "test-key"
+        with patch.object(hal, "deepl_has_quota", return_value=False):
+            label = hal._translation_engine_label()
+        self.assertIn("claude-haiku-4.5", label)
+        self.assertIn("13", label)
+        self.assertIn("a pagamento", label)
+
+    def test_quota_check_failure_still_names_paid_fallback(self):
+        from unittest.mock import patch
+        hal.DEEPL_API_KEY = "test-key"
+        with patch.object(hal, "deepl_has_quota", return_value=None):
+            label = hal._translation_engine_label()
+        self.assertIn("claude-haiku-4.5", label)
+        self.assertIn("a pagamento", label)
+
+
+class TestDeeplFallbackNotification(unittest.TestCase):
+    """translate_srt() must tell Telegram, once per run, when it silently
+    fell through to the paid Claude/OpenRouter fallback — distinguishing a
+    confirmed quota exhaustion (with reset date) from a transient failure."""
+
+    def setUp(self):
+        self.prev_key = hal.DEEPL_API_KEY
+        hal.DEEPL_API_KEY = "test-key"
+        hal._deepl_quota_notified = False
+        hal._deepl_fallback_message_sent = False
+
+    def tearDown(self):
+        hal.DEEPL_API_KEY = self.prev_key
+        hal._deepl_quota_notified = False
+        hal._deepl_fallback_message_sent = False
+
+    def _srt(self):
+        return "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+
+    def test_quota_exceeded_message_names_engine_and_reset_day(self):
+        from unittest.mock import patch
+        sent = []
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 456, "Quota Exceeded", hdrs=None,
+                fp=io.BytesIO(b'{"message":"Quota exceeded"}'),
+            )
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)), \
+             patch.object(hal, "translate_srt_with_claude", return_value="translated"):
+            result = hal.translate_srt(self._srt(), "Test Movie")
+
+        self.assertEqual(result, "translated")
+        self.assertEqual(len(sent), 1)
+        joined = str(sent[0])
+        self.assertIn("Quota DeepL esaurita", joined)
+        self.assertIn("resetta", joined)
+
+    def test_transient_error_message_has_no_reset_claim(self):
+        from unittest.mock import patch
+        sent = []
+
+        def fake_urlopen(req, timeout=None):
+            raise OSError("connection refused")
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)), \
+             patch.object(hal, "translate_srt_with_claude", return_value="translated"):
+            hal.translate_srt(self._srt(), "Test Movie")
+
+        joined = str(sent[0])
+        self.assertIn("non raggiungibile", joined)
+        self.assertNotIn("resetta", joined)
+
+    def test_fallback_notice_sent_only_once_per_run(self):
+        from unittest.mock import patch
+        sent = []
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 456, "Quota Exceeded", hdrs=None,
+                fp=io.BytesIO(b'{"message":"Quota exceeded"}'),
+            )
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)), \
+             patch.object(hal, "translate_srt_with_claude", return_value="translated"):
+            hal.translate_srt(self._srt(), "Movie One")
+            hal.translate_srt(self._srt(), "Movie Two")
+
+        self.assertEqual(len(sent), 1)
+
+
 class TestClaudeBisectFallback(unittest.TestCase):
     """Verify the Claude fallback recovers from truncation/missing cues by
     bisecting the batch instead of silently leaving cues in English."""

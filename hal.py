@@ -69,7 +69,7 @@ SUBSOURCE_API_URL = "https://api.subsource.net/v1"
 
 # LLM API for translation (EN -> IT fallback / polish pass), via OpenRouter.
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "deepseek/deepseek-v4-flash")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "anthropic/claude-haiku-4.5")
 CLAUDE_POLISH_MODEL = os.environ.get("CLAUDE_POLISH_MODEL", "deepseek/deepseek-v4-flash")
 CLAUDE_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -80,6 +80,8 @@ DEEPL_API_URL = (
     if DEEPL_API_KEY.endswith(":fx")
     else "https://api.deepl.com/v2/translate"
 )
+# Day-of-month DeepL's free quota resets on (shown on deepl.com/your-account).
+DEEPL_QUOTA_RESET_DAY = os.environ.get("DEEPL_QUOTA_RESET_DAY", "13")
 # Run a Claude polish pass over DeepL output to rewrite unnatural lines.
 POLISH_TRANSLATION = os.environ.get("POLISH_TRANSLATION", "true").lower() in ("1", "true", "yes")
 
@@ -3831,6 +3833,30 @@ def translate_srt_with_claude(srt_content, video_name):
 DEEPL_PRICE_PER_MILLION_CHARS = 20.0
 
 
+_deepl_quota_notified = False  # avoid spamming Telegram once per video in a batch
+
+
+def deepl_has_quota():
+    """Check DeepL's /v2/usage endpoint — free, doesn't consume quota or
+    translate anything. Returns True if quota remains, False if exhausted or
+    the key isn't set, None if the check itself failed (network error etc,
+    distinct from a confirmed-exhausted False)."""
+    if not DEEPL_API_KEY:
+        return False
+    usage_url = DEEPL_API_URL.replace("/v2/translate", "/v2/usage")
+    req = urllib.request.Request(
+        usage_url,
+        headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        return result.get("character_count", 0) < result.get("character_limit", 0)
+    except Exception as e:
+        log.warning(f"  DeepL usage check failed: {e}")
+        return None
+
+
 def translate_srt_with_deepl(srt_content):
     """Translate SRT content from English to Italian using DeepL API.
     Translates one cue at a time (batched 50/request — DeepL's max), so the
@@ -3897,6 +3923,9 @@ def translate_srt_with_deepl(srt_content):
             except Exception:
                 pass
             log.error(f"  DeepL HTTP {e.code} (batch {start//BATCH + 1}): {body[:200]}")
+            if e.code == 456:
+                global _deepl_quota_notified
+                _deepl_quota_notified = True
             return None
         except Exception as e:
             log.error(f"  DeepL error (batch {start//BATCH + 1}): {e}")
@@ -4072,8 +4101,35 @@ def translate_srt(srt_content, video_name):
                 log.info("  Polish pass skipped (POLISH_TRANSLATION disabled or no CLAUDE_API_KEY)")
             return blocks_to_srt(it_blocks)
         log.warning("  DeepL translation failed, falling back to Claude full-translate")
+        _notify_deepl_fallback_once()
 
     return translate_srt_with_claude(srt_content, video_name)
+
+
+_deepl_fallback_message_sent = False  # only tell Telegram about the fallback once per HAL run
+
+
+def _notify_deepl_fallback_once():
+    """Tell Telegram once per HAL run that DeepL is down and translations are
+    running on the (paid) Claude/OpenRouter fallback instead — with the quota
+    reset date when we know it's a quota exhaustion, not a transient error."""
+    global _deepl_fallback_message_sent
+    if _deepl_fallback_message_sent:
+        return
+    _deepl_fallback_message_sent = True
+
+    if _deepl_quota_notified:
+        reset_note = f"\n📅 Quota DeepL si resetta il {DEEPL_QUOTA_RESET_DAY} del mese." if DEEPL_QUOTA_RESET_DAY else ""
+        tg_send(
+            f"⚠️ <b>Quota DeepL esaurita</b> — uso il fallback {CLAUDE_MODEL} per le traduzioni "
+            f"(a pagamento, costo minimo)."
+            f"{reset_note}"
+        )
+    else:
+        tg_send(
+            f"⚠️ <b>DeepL non raggiungibile</b> — uso il fallback {CLAUDE_MODEL} per le traduzioni. "
+            f"Controlla i log con /log se persiste."
+        )
 
 
 def _cascade_search(client, video_path, language, file_hash=None, file_size=0, trace=None):
@@ -7867,7 +7923,8 @@ def do_batch_download(paths, state, progress_msg_id=None):
 
     if en_paths:
         total_cost, total_blocks = _estimate_batch_translation_cost(en_paths)
-        summary += f"\n\n💰 <b>Costo traduzione stimato: ${total_cost:.2f}</b> ({total_blocks} blocchi)"
+        engine = _translation_engine_label()
+        summary += f"\n\n💰 <b>Costo traduzione stimato: ${total_cost:.2f}</b> ({total_blocks} blocchi)\n⚙️ Motore: {engine}"
 
         translate_hash = str(abs(hash(tuple(en_paths))))[:8]
         batches = load_batches()
@@ -7962,7 +8019,8 @@ def do_translate_prep(query, state, progress_msg_id=None):
         summary += f"🇮🇹 Già con sub ITA (saltati): {len(already_it)}\n"
     if no_en:
         summary += f"🇬🇧 Senza .en.srt (saltati): {len(no_en)}\n"
-    summary += f"\n💰 <b>Costo traduzione stimato: ${total_cost:.2f}</b> ({total_blocks} blocchi)"
+    engine = _translation_engine_label()
+    summary += f"\n💰 <b>Costo traduzione stimato: ${total_cost:.2f}</b> ({total_blocks} blocchi)\n⚙️ Motore: {engine}"
 
     translate_hash = str(abs(hash(tuple(en_paths))))[:8]
     batches = load_batches()
@@ -8095,6 +8153,21 @@ def _offer_english_replace(query, matches, missing, existing, progress_msg_id=No
          "callback_data": f"subeng_skip:{subeng_hash}"},
     ]]}
     _notify(progress_msg_id, text, reply_markup=keyboard)
+
+
+def _translation_engine_label():
+    """Which engine a translation confirmation is about to use, and why —
+    shown in the Traduci button prompt so the user knows what they're paying
+    for (or not) before confirming."""
+    if not DEEPL_API_KEY:
+        return f"🤖 {CLAUDE_MODEL} (DeepL non configurato, a pagamento)"
+    quota_ok = deepl_has_quota()
+    if quota_ok is True:
+        return "🆓 DeepL (gratuito)"
+    if quota_ok is False:
+        reset_note = f", si resetta il {DEEPL_QUOTA_RESET_DAY} del mese" if DEEPL_QUOTA_RESET_DAY else ""
+        return f"🤖 {CLAUDE_MODEL} (quota DeepL esaurita{reset_note}, a pagamento)"
+    return f"🤖 {CLAUDE_MODEL} (impossibile verificare quota DeepL, a pagamento)"
 
 
 def _estimate_batch_translation_cost(paths):
