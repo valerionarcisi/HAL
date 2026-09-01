@@ -769,7 +769,10 @@ class TestTranslatePrep(unittest.TestCase):
                 hal.do_translate_prep("film", state={}, progress_msg_id=None)
             sync_mock.assert_called_once_with(video, en)
             self.assertTrue(any("batch_translate" in str(s) for s in sent))
-            self.assertTrue(any("0.12" in str(s) for s in sent))
+            # Cost shown to the user is EUR-converted, not the raw USD 0.12
+            # that _estimate_batch_translation_cost returned.
+            expected_eur = f"{hal.usd_to_eur(0.12):.2f}"
+            self.assertTrue(any(expected_eur in str(s) for s in sent))
         finally:
             shutil.rmtree(tmp)
 
@@ -1868,6 +1871,75 @@ class TestDeeplQuotaCheck(unittest.TestCase):
 
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
             self.assertIsNone(hal.deepl_has_quota())
+
+
+class TestUsdToEurConversion(unittest.TestCase):
+    """Every €-prefixed cost shown to the user must be the converted amount,
+    never a raw USD number with a euro sign slapped on it — that was the bug:
+    provider price lists are USD, and a euro sign on an unconverted number
+    silently overstates what the user is actually being asked to spend."""
+
+    def setUp(self):
+        self.prev_rate = hal.USD_TO_EUR_RATE
+        hal.USD_TO_EUR_RATE = 0.92
+
+    def tearDown(self):
+        hal.USD_TO_EUR_RATE = self.prev_rate
+
+    def test_applies_configured_rate(self):
+        self.assertAlmostEqual(hal.usd_to_eur(1.0), 0.92)
+        self.assertAlmostEqual(hal.usd_to_eur(0.36), 0.3312)
+
+    def test_zero_stays_zero(self):
+        self.assertEqual(hal.usd_to_eur(0.0), 0.0)
+
+    def test_rate_is_configurable_via_env_default(self):
+        # USD_TO_EUR_RATE is read from the environment at import time with a
+        # 0.92 default — verify the module-level constant matches that shape
+        # rather than being a hardcoded 1:1 pass-through.
+        self.assertNotEqual(hal.USD_TO_EUR_RATE, 1.0)
+
+
+class TestModelPricePerMillion(unittest.TestCase):
+    """_model_price_per_million() must return the real price for the model
+    that will actually run the call — the bug this covers is the estimate
+    silently using Sonnet pricing (3x too high) after CLAUDE_MODEL had
+    already been switched to the cheaper Haiku."""
+
+    def test_haiku_price(self):
+        input_price, output_price = hal._model_price_per_million("anthropic/claude-haiku-4.5")
+        self.assertEqual((input_price, output_price), (1.0, 5.0))
+
+    def test_sonnet_price_is_higher_than_haiku(self):
+        sonnet_in, sonnet_out = hal._model_price_per_million("anthropic/claude-sonnet-4.5")
+        haiku_in, haiku_out = hal._model_price_per_million("anthropic/claude-haiku-4.5")
+        self.assertGreater(sonnet_in, haiku_in)
+        self.assertGreater(sonnet_out, haiku_out)
+
+    def test_unknown_model_falls_back_to_current_defaults(self):
+        result = hal._model_price_per_million("some/unknown-model")
+        self.assertEqual(result, (hal.CLAUDE_INPUT_PRICE, hal.CLAUDE_OUTPUT_PRICE))
+
+    def test_estimate_uses_active_model_price_not_hardcoded_sonnet(self):
+        """The actual bug: estimate_translation_cost() must price against
+        whatever CLAUDE_MODEL is set to, not a module-level Sonnet constant
+        left over from before the OpenRouter migration."""
+        srt = "1\n00:00:01,000 --> 00:00:02,000\nHello there, how are you doing today?\n"
+
+        prev_model = hal.CLAUDE_MODEL
+        try:
+            hal.CLAUDE_MODEL = "anthropic/claude-haiku-4.5"
+            haiku_cost, _ = hal.estimate_translation_cost(srt)
+
+            hal.CLAUDE_MODEL = "anthropic/claude-sonnet-4.5"
+            sonnet_cost, _ = hal.estimate_translation_cost(srt)
+        finally:
+            hal.CLAUDE_MODEL = prev_model
+
+        # Sonnet is 3x the price of Haiku on both input and output, so the
+        # estimate must scale accordingly — not be identical or arbitrary.
+        self.assertGreater(sonnet_cost, haiku_cost)
+        self.assertAlmostEqual(sonnet_cost / haiku_cost, 3.0, places=2)
 
 
 class TestTranslationEngineLabel(unittest.TestCase):

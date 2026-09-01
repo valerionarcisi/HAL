@@ -3585,17 +3585,42 @@ def blocks_to_srt(blocks):
     return "\n\n".join(parts) + "\n"
 
 
-# Claude API pricing (USD per million tokens) — Sonnet
-CLAUDE_INPUT_PRICE = 3.0   # $3/M input tokens
-CLAUDE_OUTPUT_PRICE = 15.0  # $15/M output tokens
+# Fallback-translate pricing (USD per million tokens). Kept in sync with
+# whatever CLAUDE_MODEL actually is via _model_price_per_million() below —
+# these two are only the Haiku-4.5 defaults (the current CLAUDE_MODEL).
+CLAUDE_INPUT_PRICE = 1.0   # $1/M input tokens (Haiku 4.5)
+CLAUDE_OUTPUT_PRICE = 5.0  # $5/M output tokens (Haiku 4.5)
+
+# USD->EUR conversion for Telegram-facing cost display only. Provider price
+# lists (Anthropic, OpenRouter, DeepL) are all USD; this doesn't change what
+# actually gets billed, only what number/symbol the user sees.
+USD_TO_EUR_RATE = float(os.environ.get("USD_TO_EUR_RATE", "0.92"))
+
+
+def usd_to_eur(usd_amount):
+    return usd_amount * USD_TO_EUR_RATE
+
+
+def _model_price_per_million(model_name):
+    """(input, output) USD price per million tokens for known OpenRouter
+    model ids used here. Falls back to the Haiku-4.5 price (the current
+    CLAUDE_MODEL default) for an unrecognized id rather than guessing wrong
+    in either direction."""
+    prices = {
+        "anthropic/claude-haiku-4.5": (1.0, 5.0),
+        "anthropic/claude-sonnet-4.5": (3.0, 15.0),
+        "deepseek/deepseek-v4-flash": (0.07784, 0.15568),
+        "deepseek/deepseek-chat-v3.1": (0.14, 0.28),
+    }
+    return prices.get(model_name, (CLAUDE_INPUT_PRICE, CLAUDE_OUTPUT_PRICE))
 
 
 def estimate_translation_cost(srt_content):
-    """Estimate the Claude API cost for translating an SRT file.
+    """Estimate the fallback-translate cost (CLAUDE_MODEL) for an SRT file.
     Returns (estimated_cost_usd, num_blocks).
 
     Calibrated on real usage data: output tokens ~ input tokens * 1.09,
-    but output costs 5x more than input so the output dominates the total.
+    but output costs more than input so the output dominates the total.
     A 15% safety margin is added to avoid systematic underestimation."""
     blocks = parse_srt(srt_content)
     if not blocks:
@@ -3605,7 +3630,8 @@ def estimate_translation_cost(srt_content):
     num_batches = len(blocks) // 100 + 1
     input_tokens = int(word_count * 1.3) + num_batches * 150
     output_tokens = int(input_tokens * 1.15)  # Italian tends to be slightly longer
-    raw_cost = (input_tokens * CLAUDE_INPUT_PRICE + output_tokens * CLAUDE_OUTPUT_PRICE) / 1_000_000
+    input_price, output_price = _model_price_per_million(CLAUDE_MODEL)
+    raw_cost = (input_tokens * input_price + output_tokens * output_price) / 1_000_000
     cost = raw_cost * 1.15  # 15% safety margin based on observed real vs estimated ratio
     return cost, len(blocks)
 
@@ -6207,24 +6233,24 @@ def _cmd_costi(arg, state, excludes):
         f"\n🌐 <b>DeepL</b> (primario)\n"
         f"  Caratteri: {deepl_chars:,}\n"
         f"  Traduzioni: {deepl_runs}\n"
-        f"  Costo equivalente: €{deepl_eq_cost:.4f} (gratis fino a 1M/mese su free tier)"
+        f"  Costo equivalente: €{usd_to_eur(deepl_eq_cost):.4f} (gratis fino a 1M/mese su free tier)"
     )
 
     sections.append(
         f"\n✨ <b>Polish</b> ({CLAUDE_POLISH_MODEL})\n"
         f"  Token: {pol_in:,} in + {pol_out:,} out\n"
         f"  Polish eseguiti: {pol_runs}\n"
-        f"  Costo: €{pol_cost:.4f}"
+        f"  Costo: €{usd_to_eur(pol_cost):.4f}"
     )
 
     sections.append(
         f"\n🤖 <b>Fallback</b> ({CLAUDE_MODEL})\n"
         f"  Token: {son_in:,} in + {son_out:,} out\n"
         f"  Traduzioni: {son_runs}\n"
-        f"  Costo: €{son_cost:.4f}"
+        f"  Costo: €{usd_to_eur(son_cost):.4f}"
     )
 
-    sections.append(f"\n📈 <b>Totale fallback a pagamento: €{total_paid:.4f}</b>")
+    sections.append(f"\n📈 <b>Totale fallback a pagamento: €{usd_to_eur(total_paid):.4f}</b>")
     tg_send("\n".join(sections))
 
 
@@ -7924,7 +7950,7 @@ def do_batch_download(paths, state, progress_msg_id=None):
     if en_paths:
         total_cost, total_blocks = _estimate_batch_translation_cost(en_paths)
         engine = _translation_engine_label()
-        summary += f"\n\n💰 <b>Costo traduzione stimato: €{total_cost:.2f}</b> ({total_blocks} blocchi)\n⚙️ Motore: {engine}"
+        summary += f"\n\n💰 <b>Costo traduzione stimato: €{usd_to_eur(total_cost):.2f}</b> ({total_blocks} blocchi)\n⚙️ Motore: {engine}"
 
         translate_hash = str(abs(hash(tuple(en_paths))))[:8]
         batches = load_batches()
@@ -7936,7 +7962,7 @@ def do_batch_download(paths, state, progress_msg_id=None):
 
         keyboard = {"inline_keyboard": [
             [
-                {"text": f"🤖 Traduci in italiano (€{total_cost:.2f})", "callback_data": f"batch_translate:{translate_hash}"},
+                {"text": f"🤖 Traduci in italiano (€{usd_to_eur(total_cost):.2f})", "callback_data": f"batch_translate:{translate_hash}"},
                 {"text": "🇬🇧 Tieni solo ENG", "callback_data": f"batch_keep_en:{translate_hash}"},
             ]
         ]}
@@ -8020,7 +8046,7 @@ def do_translate_prep(query, state, progress_msg_id=None):
     if no_en:
         summary += f"🇬🇧 Senza .en.srt (saltati): {len(no_en)}\n"
     engine = _translation_engine_label()
-    summary += f"\n💰 <b>Costo traduzione stimato: €{total_cost:.2f}</b> ({total_blocks} blocchi)\n⚙️ Motore: {engine}"
+    summary += f"\n💰 <b>Costo traduzione stimato: €{usd_to_eur(total_cost):.2f}</b> ({total_blocks} blocchi)\n⚙️ Motore: {engine}"
 
     translate_hash = str(abs(hash(tuple(en_paths))))[:8]
     batches = load_batches()
@@ -8028,7 +8054,7 @@ def do_translate_prep(query, state, progress_msg_id=None):
     save_batches(batches)
 
     keyboard = {"inline_keyboard": [[
-        {"text": f"🤖 Traduci in italiano (€{total_cost:.2f})", "callback_data": f"batch_translate:{translate_hash}"},
+        {"text": f"🤖 Traduci in italiano (€{usd_to_eur(total_cost):.2f})", "callback_data": f"batch_translate:{translate_hash}"},
         {"text": "🇬🇧 Tieni solo ENG", "callback_data": f"batch_keep_en:{translate_hash}"},
     ]]}
     if progress_msg_id:
@@ -8378,13 +8404,13 @@ def _queue_worker(state_ref):
                     engine = _translation_engine_label()
                     keyboard = {"inline_keyboard": [
                         [
-                            {"text": f"🤖 Traduci (€{cost:.2f})", "callback_data": f"batch_translate:{tr_hash}"},
+                            {"text": f"🤖 Traduci (€{usd_to_eur(cost):.2f})", "callback_data": f"batch_translate:{tr_hash}"},
                             {"text": "🇬🇧 Tieni ENG", "callback_data": f"batch_keep_en:{tr_hash}"},
                         ]
                     ]}
                     tg_edit_message(msg_id,
                         f"🇬🇧 Sub ENG trovato per:\n<b>{name}</b>\n\n"
-                        f"💰 Tradurre in italiano? Costo: <b>€{cost:.2f}</b> ({blocks} blocchi)\n⚙️ Motore: {engine}",
+                        f"💰 Tradurre in italiano? Costo: <b>€{usd_to_eur(cost):.2f}</b> ({blocks} blocchi)\n⚙️ Motore: {engine}",
                         reply_markup=keyboard)
                 elif not result and msg_id:
                     trace_text = format_search_trace(trace)
