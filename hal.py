@@ -22,6 +22,7 @@ import base64
 import logging
 import time
 import re
+import shutil
 import tempfile
 import urllib.request
 import urllib.error
@@ -367,14 +368,25 @@ def _inline_result_article(result_id, title, description, message_text):
 
 
 def do_inline_search(query):
-    """Search TMDb for both directors and films matching `query`, for the
-    inline-mode (`@HALbot <text>`) autocomplete. Returns a list of
-    InlineQueryResultArticle dicts, directors first. Each result's chosen
-    message is a ready-to-send slash command (/regista or /scarica)."""
-    if not TMDB_API_KEY or not query or len(query) < 2:
+    """Search the local library and TMDb for the inline-mode (`@HALbot <text>`)
+    autocomplete. Returns a list of InlineQueryResultArticle dicts: local film
+    matches first (message = /rimuovi <titolo>), then directors, then TMDb
+    films (message = /regista or /scarica)."""
+    if not query or len(query) < 2:
         return []
 
     results = []
+    for folder, video in find_films_by_name(query)[:5]:
+        results.append(_inline_result_article(
+            f"local:{folder}",
+            f"📁 {friendly_name(video)}",
+            "In libreria — /rimuovi",
+            f"/rimuovi {os.path.basename(folder)}",
+        ))
+
+    if not TMDB_API_KEY:
+        return results
+
     for p in tmdb_search_person(query, limit=5):
         known = f" — {p['known_for']}" if p["known_for"] else ""
         results.append(_inline_result_article(
@@ -1574,6 +1586,22 @@ class RadarrClient:
             if m.get("tmdbId") == tmdb_id:
                 return m
         return None
+
+    def find_by_path(self, video_path):
+        """If a Radarr movie's folder contains video_path, return its full record, else None."""
+        movies = self._request("GET", "/movie") or []
+        for m in movies:
+            folder = m.get("path")
+            if folder and video_path.startswith(folder.rstrip("/") + "/"):
+                return m
+        return None
+
+    def delete(self, movie_id, delete_files=True):
+        """Remove a movie from Radarr. delete_files also removes it from disk."""
+        return self._request(
+            "DELETE", f"/movie/{movie_id}",
+            params={"deleteFiles": "true" if delete_files else "false", "addImportExclusion": "false"},
+        )
 
     def add(self, tmdb_id):
         """Add a film to Radarr without auto-grabbing. Returns the new movieId.
@@ -6183,6 +6211,33 @@ def _cmd_cancella(arg, state, excludes):
     offer_delete(arg, state)
 
 
+def _cmd_lista(arg, state, excludes):
+    films = sorted(find_films_by_name(""), key=lambda pair: os.path.basename(pair[0]).lower())
+    if not films:
+        tg_send("📂 Nessun film in libreria.")
+        return
+    lines = [f"🎬 <b>{len(films)} film in libreria</b>\n"]
+    for folder, video in films:
+        lines.append(html.escape(friendly_name(video)))
+    body = "\n".join(lines)
+    if len(body) > 3800:
+        body = body[:3800]
+        body = body[:body.rfind("\n")]
+        body += f"\n\n<i>… lista troncata, usa /rimuovi &lt;nome&gt; con un termine più specifico per trovare un film.</i>"
+    tg_send(body)
+
+
+def _cmd_rimuovi(arg, state, excludes):
+    if not arg:
+        tg_send(
+            "Usa: <code>/rimuovi nome film</code>\n"
+            "Elimina definitivamente il film dal disco (e da Radarr, se configurato). "
+            "Chiede conferma prima di procedere."
+        )
+        return
+    offer_remove_film(arg, state)
+
+
 def _cmd_traduci(arg, state, excludes):
     if not arg:
         tg_send(
@@ -6491,6 +6546,9 @@ COMMANDS = [
     {"canonical": "/cancella", "aliases": ["/delete", "/del"], "handler": _cmd_cancella,
      "group": "Gestione sub", "args": "<nome>",
      "desc": "Cancella tutti i sub e riaccoda per nuova ricerca"},
+    {"canonical": "/rimuovi", "aliases": ["/remove", "/rm"], "handler": _cmd_rimuovi,
+     "group": "Gestione sub", "args": "<nome film>",
+     "desc": "Elimina definitivamente un film dal disco (e da Radarr) — chiede conferma"},
 
     # Status & maintenance
     {"canonical": "/stato", "aliases": ["/status", "/st"], "handler": _cmd_stato,
@@ -6511,6 +6569,9 @@ COMMANDS = [
     {"canonical": "/log", "aliases": ["/logs"], "handler": _cmd_log,
      "group": "Stato & manutenzione", "args": "[n]",
      "desc": "Ultime n righe di log (default 30, max 200)"},
+    {"canonical": "/lista", "aliases": ["/list", "/films"], "handler": _cmd_lista,
+     "group": "Stato & manutenzione", "args": "",
+     "desc": "Elenca tutti i film in libreria"},
     {"canonical": "/scansiona", "aliases": ["/scan"], "handler": _cmd_scansiona,
      "group": "Stato & manutenzione", "args": "",
      "desc": "Forza una scansione manuale"},
@@ -7123,6 +7184,66 @@ def process_callbacks(state, excludes):
                 save_batches(batches)
                 continue
 
+            if action in ("remove_yes", "remove_no"):
+                batches = load_batches()
+                batch = batches.get(path_hash)
+                if not batch:
+                    tg_answer_callback(cb_id, "⚠️ Operazione non trovata")
+                    continue
+
+                if action == "remove_no":
+                    tg_answer_callback(cb_id, "❌ Annullato")
+                    if msg_id:
+                        tg_edit_message(msg_id, "❌ Eliminazione annullata.")
+                    batches.pop(path_hash, None)
+                    save_batches(batches)
+                    continue
+
+                # remove_yes
+                folder = batch["folder"]
+                video = batch["video"]
+                radarr_note = ""
+                if RADARR_URL and RADARR_API_KEY:
+                    try:
+                        radarr = RadarrClient()
+                        movie = radarr.find_by_path(video)
+                        if movie:
+                            radarr.delete(movie["id"], delete_files=True)
+                            radarr_note = "\n🎬 Rimosso anche da Radarr."
+                    except Exception as e:
+                        log.warning(f"  Radarr delete failed for {folder}: {e}")
+                        radarr_note = "\n⚠️ Rimozione da Radarr fallita (vedi log)."
+
+                deleted = False
+                if os.path.exists(folder) and not radarr_note.startswith("\n🎬"):
+                    # Radarr's deleteFiles already removed the folder when it managed the film;
+                    # only do it ourselves if Radarr didn't (not configured, or film not in Radarr).
+                    try:
+                        shutil.rmtree(folder)
+                        deleted = True
+                    except Exception as e:
+                        log.warning(f"  Failed to delete {folder}: {e}")
+                elif not os.path.exists(folder):
+                    deleted = True
+
+                state = load_state()
+                state["downloaded"].pop(video, None)
+                state["asked"].pop(video, None)
+                save_state(state)
+
+                if deleted or radarr_note.startswith("\n🎬"):
+                    tg_answer_callback(cb_id, "🗑 Film eliminato")
+                    if msg_id:
+                        tg_edit_message(msg_id, f"✅ Eliminato: <b>{friendly_name(video)}</b>{radarr_note}")
+                else:
+                    tg_answer_callback(cb_id, "⚠️ Errore durante l'eliminazione")
+                    if msg_id:
+                        tg_edit_message(msg_id, f"⚠️ Errore eliminando <b>{friendly_name(video)}</b>, controlla i log.")
+
+                batches.pop(path_hash, None)
+                save_batches(batches)
+                continue
+
             if action in ("subeng_replace", "subeng_skip"):
                 batches = load_batches()
                 batch = batches.get(path_hash)
@@ -7382,6 +7503,67 @@ def offer_delete(query, state):
         {"text": "❌ Annulla", "callback_data": f"delete_no:{delete_hash}"},
     ]]}
     tg_send("\n".join(lines), reply_markup=keyboard)
+
+
+def find_films_by_name(query):
+    """Search FILMS_PATH only, one match per film folder (not per file inside it)."""
+    query_clean = re.sub(r"[._\-]", " ", query.lower())
+    seen_folders = {}
+    if not os.path.exists(FILMS_PATH):
+        return []
+    for root, dirs, files in os.walk(FILMS_PATH):
+        for fname in files:
+            if os.path.splitext(fname)[1].lower() not in VIDEO_EXTENSIONS:
+                continue
+            full_path = os.path.join(root, fname)
+            folder_name = get_series_folder(full_path)
+            folder_clean = re.sub(r"[._\-]", " ", folder_name.lower())
+            if query_clean in folder_clean:
+                folder = os.path.join(FILMS_PATH, folder_name)
+                seen_folders.setdefault(folder, full_path)
+    return list(seen_folders.items())  # [(folder_path, sample_video_path), ...]
+
+
+def offer_remove_film(query, state):
+    """Find film(s) matching query, ask for destructive confirmation before
+    deleting the folder from disk and the entry from Radarr (if configured)."""
+    matches = find_films_by_name(query)
+    if not matches:
+        tg_send(f"❌ Nessun film trovato per '<b>{query}</b>'")
+        return
+    if len(matches) > 1:
+        lines = [f"⚠️ Trovati <b>{len(matches)}</b> film per '<b>{query}</b>', sii più specifico:\n"]
+        for folder, video in matches[:10]:
+            lines.append(f"📁 {friendly_name(video)}")
+        tg_send("\n".join(lines))
+        return
+
+    folder, video = matches[0]
+    try:
+        size_gb = sum(
+            os.path.getsize(os.path.join(r, f))
+            for r, _, fs in os.walk(folder) for f in fs
+        ) / (1024 ** 3)
+    except Exception:
+        size_gb = 0
+
+    remove_hash = str(abs(hash(folder)))[:8]
+    batches = load_batches()
+    batches[remove_hash] = {"type": "remove_film", "folder": folder, "video": video}
+    save_batches(batches)
+
+    keyboard = {"inline_keyboard": [[
+        {"text": "🗑 Elimina definitivamente", "callback_data": f"remove_yes:{remove_hash}"},
+        {"text": "❌ Annulla", "callback_data": f"remove_no:{remove_hash}"},
+    ]]}
+    tg_send(
+        f"⚠️ <b>Eliminare questo film?</b>\n\n"
+        f"📁 <b>{friendly_name(video)}</b>\n"
+        f"💾 {size_gb:.1f} GB\n"
+        f"🗂 <code>{html.escape(folder)}</code>\n\n"
+        f"Questa azione è <b>irreversibile</b> e rimuove anche la voce da Radarr (se configurato).",
+        reply_markup=keyboard,
+    )
 
 
 def search_and_offer(query, state):
