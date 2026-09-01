@@ -14,6 +14,7 @@ import zipfile
 import urllib.request
 import urllib.error
 import json
+from unittest.mock import patch
 
 # Setup: create a temp /config-like directory and patch the module
 # before it gets imported, to avoid FileNotFoundError on /config
@@ -5738,6 +5739,229 @@ class TestWeightedRating(unittest.TestCase):
 
     def test_zero_votes_collapses_to_global_mean(self):
         self.assertEqual(hal._weighted_rating(10.0, 0, 6.5), 6.5)
+
+
+class IntegrationTestBase(unittest.TestCase):
+    """Shared plumbing for command-level integration tests: a real temp
+    FILMS_PATH, a fake Telegram (sent messages + injectable callback
+    updates), and a synchronous queue drain instead of a live worker thread
+    so each test is deterministic and doesn't need to sleep/poll."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.films_dir = os.path.join(self.tmp, "films")
+        os.makedirs(self.films_dir)
+        self._patches = [
+            patch.object(hal, "FILMS_PATH", self.films_dir),
+            patch.object(hal, "SERIES_PATH", os.path.join(self.tmp, "series")),
+            patch.object(hal, "RADARR_URL", ""),
+            patch.object(hal, "RADARR_API_KEY", ""),
+        ]
+        for p in self._patches:
+            p.start()
+
+        self.sent = []
+        self.batches_store = {}
+        # Same shape load_state() returns by default — real callers always
+        # get these keys populated, so process_callbacks assumes they exist.
+        self.state = {"asked": {}, "downloaded": {}, "italian_original": {}, "seen": [], "last_offset": 0}
+        self._tg_sender = patch.object(
+            hal, "tg_send",
+            side_effect=lambda *a, **k: self.sent.append((a, k)) or {"ok": True, "result": {"message_id": len(self.sent)}},
+        )
+        self._tg_editor = patch.object(
+            hal, "tg_edit_message",
+            side_effect=lambda *a, **k: self.sent.append((a, k)) or {"ok": True},
+        )
+        self._batches = patch.object(hal, "load_batches", side_effect=lambda: self.batches_store)
+        # load_batches() always hands back the same dict, so mutations (batches[x] = ...)
+        # are already visible in self.batches_store — save_batches has nothing to do.
+        self._batches_save = patch.object(hal, "save_batches", side_effect=lambda b: None)
+        # Several call sites re-fetch state via load_state()/save_state() instead of
+        # using the state dict passed down the call chain — without this, a test run
+        # would read/write the real NAS state.json.
+        self._load_state = patch.object(hal, "load_state", side_effect=lambda: self.state)
+        self._save_state = patch.object(hal, "save_state", side_effect=lambda s: None)
+        self._tg_sender.start()
+        self._tg_editor.start()
+        self._batches.start()
+        self._batches_save.start()
+        self._load_state.start()
+        self._save_state.start()
+
+        while not hal.download_queue.empty():
+            hal.download_queue.get_nowait()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        self._tg_sender.stop()
+        self._tg_editor.stop()
+        self._batches.stop()
+        self._batches_save.stop()
+        self._load_state.stop()
+        self._save_state.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_film(self, folder_name, filename, subs=()):
+        folder = os.path.join(self.films_dir, folder_name)
+        os.makedirs(folder, exist_ok=True)
+        video = os.path.join(folder, filename)
+        with open(video, "wb") as f:
+            f.write(b"\0" * 1024)
+        for suffix, content in subs:
+            with open(os.path.splitext(video)[0] + suffix, "w", encoding="utf-8") as f:
+                f.write(content)
+        return video
+
+    def _drain_queue(self):
+        """Synchronously run every job currently queued, exactly as the real
+        worker thread would one at a time — see _process_queue_job's
+        docstring for why this is safe to call directly in a test."""
+        while not hal.download_queue.empty():
+            job = hal.download_queue.get_nowait()
+            hal._process_queue_job(job, self.state)
+
+    def _sent_text(self):
+        return " ".join(str(s) for s in self.sent)
+
+    def _fire_callback(self, callback_data, message_id=1):
+        """Inject one fake Telegram callback update and run process_callbacks
+        against it, exactly as the real polling loop would for a button
+        press — process_callbacks is a large dispatcher, not worth
+        reimplementing in the test, so we drive it through its real
+        entrypoint instead."""
+        update = {
+            "update_id": self.state.get("last_offset", 0) + 1,
+            "callback_query": {
+                "id": "cbid1",
+                "data": callback_data,
+                "message": {"message_id": message_id},
+            },
+        }
+        with patch.object(hal, "tg_get_updates", return_value=[update]), \
+             patch.object(hal, "tg_answer_callback", side_effect=lambda *a, **k: self.sent.append(("answer",) + a)):
+            hal.process_callbacks(self.state, set())
+
+
+class TestIntegrationRimuovi(IntegrationTestBase):
+    """/rimuovi end-to-end: find the film, show the destructive confirm
+    prompt, and only touch the filesystem after the user presses confirm."""
+
+    def test_confirm_deletes_folder_from_disk(self):
+        video = self._make_film("Il Gladiatore (2000)", "gladiator.mkv")
+        folder = os.path.dirname(video)
+
+        hal.dispatch_command("/rimuovi gladiatore", self.state, set())
+        self.assertIn("Eliminare questo film", self._sent_text())
+        self.assertIn("remove_yes", self._sent_text())
+        self.assertTrue(os.path.exists(folder))
+
+        remove_hash = next(h for h, b in self.batches_store.items() if b.get("type") == "remove_film")
+        self._fire_callback(f"remove_yes:{remove_hash}")
+
+        self.assertFalse(os.path.exists(folder))
+        self.assertIn("Eliminato", self._sent_text())
+
+    def test_cancel_leaves_folder_untouched(self):
+        video = self._make_film("Il Gladiatore (2000)", "gladiator.mkv")
+        folder = os.path.dirname(video)
+
+        hal.dispatch_command("/rimuovi gladiatore", self.state, set())
+        remove_hash = next(h for h, b in self.batches_store.items() if b.get("type") == "remove_film")
+        self._fire_callback(f"remove_no:{remove_hash}")
+
+        self.assertTrue(os.path.exists(folder))
+        self.assertIn("annullata", self._sent_text())
+
+    def test_no_match_deletes_nothing(self):
+        hal.dispatch_command("/rimuovi nonexistent film xyz", self.state, set())
+        self.assertIn("Nessun film trovato", self._sent_text())
+        self.assertEqual(self.batches_store, {})
+
+
+class TestIntegrationCancella(IntegrationTestBase):
+    """/cancella end-to-end: delete existing subs and re-enqueue the video
+    for a fresh search — filesystem and queue state, not just the message."""
+
+    def test_confirm_deletes_subs_and_requeues_video(self):
+        video = self._make_film(
+            "Matrix (1999)", "matrix.mkv",
+            subs=[(".it.srt", "1\n00:00:01,000 --> 00:00:02,000\nCiao\n"),
+                  (".en.srt", "1\n00:00:01,000 --> 00:00:02,000\nHi\n")],
+        )
+        it_sub = os.path.splitext(video)[0] + ".it.srt"
+        en_sub = os.path.splitext(video)[0] + ".en.srt"
+
+        hal.dispatch_command("/cancella matrix", self.state, set())
+        self.assertIn("delete_yes", self._sent_text())
+
+        delete_hash = next(h for h, b in self.batches_store.items() if b.get("type") == "delete")
+        self._fire_callback(f"delete_yes:{delete_hash}")
+
+        self.assertFalse(os.path.exists(it_sub))
+        self.assertFalse(os.path.exists(en_sub))
+        self.assertTrue(os.path.exists(video))  # only subs are deleted, not the video
+        self.assertEqual(hal.download_queue.qsize(), 1)  # re-enqueued for a fresh search
+
+    def test_no_subs_deletes_nothing(self):
+        self._make_film("Matrix (1999)", "matrix.mkv")
+        hal.dispatch_command("/cancella matrix", self.state, set())
+        self.assertIn("Nessun sub da cancellare", self._sent_text())
+        self.assertEqual(self.batches_store, {})
+
+
+class TestIntegrationTraduci(IntegrationTestBase):
+    """/traduci end-to-end: sync prep -> cost/engine confirm prompt -> user
+    confirms -> translation actually runs and .it.srt lands on disk. Exercises
+    the async queue (translate_prep, then batch_translate) the same way the
+    real bot does, just drained synchronously instead of by a live thread."""
+
+    def test_confirm_translates_and_writes_it_srt(self):
+        video = self._make_film(
+            "Amelie (2001)", "amelie.mkv",
+            subs=[(".en.srt", "1\n00:00:01,000 --> 00:00:02,000\nHello there\n")],
+        )
+        it_sub = os.path.splitext(video)[0] + ".it.srt"
+
+        with patch.object(hal, "sync_subtitle", return_value={"ok": True}), \
+             patch.object(hal, "DEEPL_API_KEY", ""), \
+             patch.object(hal, "CLAUDE_API_KEY", "test-key"), \
+             patch.object(hal, "_claude_translate_bisect",
+                           return_value={"translations": {0: "Ciao"}, "input_tokens": 5, "output_tokens": 5}):
+            hal.dispatch_command("/traduci amelie", self.state, set())
+            self._drain_queue()  # runs translate_prep: sync + cost/engine prompt
+
+            self.assertIn("Costo traduzione stimato", self._sent_text())
+            self.assertIn("batch_translate", self._sent_text())
+            self.assertFalse(os.path.exists(it_sub))
+
+            translate_hash = next(h for h, b in self.batches_store.items() if b.get("type") == "translate")
+            self._fire_callback(f"batch_translate:{translate_hash}")
+            self._drain_queue()  # runs the actual translation job
+
+        self.assertTrue(os.path.exists(it_sub))
+        with open(it_sub, encoding="utf-8") as f:
+            self.assertIn("Ciao", f.read())
+        self.assertIn("Traduzione completata", self._sent_text())
+
+    def test_keep_english_only_skips_translation(self):
+        video = self._make_film(
+            "Amelie (2001)", "amelie.mkv",
+            subs=[(".en.srt", "1\n00:00:01,000 --> 00:00:02,000\nHello there\n")],
+        )
+        it_sub = os.path.splitext(video)[0] + ".it.srt"
+
+        with patch.object(hal, "sync_subtitle", return_value={"ok": True}), \
+             patch.object(hal, "DEEPL_API_KEY", ""), \
+             patch.object(hal, "CLAUDE_API_KEY", "test-key"):
+            hal.dispatch_command("/traduci amelie", self.state, set())
+            self._drain_queue()
+
+            translate_hash = next(h for h, b in self.batches_store.items() if b.get("type") == "translate")
+            self._fire_callback(f"batch_keep_en:{translate_hash}")
+
+        self.assertFalse(os.path.exists(it_sub))
 
 
 if __name__ == "__main__":

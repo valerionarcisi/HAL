@@ -7312,24 +7312,25 @@ def process_callbacks(state, excludes):
                         log.warning(f"  Radarr delete failed for {folder}: {e}")
                         radarr_note = "\n⚠️ Rimozione da Radarr fallita (vedi log)."
 
-                deleted = False
-                if os.path.exists(folder) and not radarr_note.startswith("\n🎬"):
-                    # Radarr's deleteFiles already removed the folder when it managed the film;
-                    # only do it ourselves if Radarr didn't (not configured, or film not in Radarr).
+                # Radarr's API can report success (deleteFiles=true, no error) without
+                # actually removing the folder — e.g. path mismatch, permissions, or
+                # the film wasn't really import-managed the way find_by_path assumed.
+                # Never trust the API response alone: always check the real filesystem
+                # state afterwards, and clean up ourselves if the folder is still there.
+                deleted = not os.path.exists(folder)
+                if not deleted:
                     try:
                         shutil.rmtree(folder)
                         deleted = True
                     except Exception as e:
                         log.warning(f"  Failed to delete {folder}: {e}")
-                elif not os.path.exists(folder):
-                    deleted = True
 
                 state = load_state()
                 state["downloaded"].pop(video, None)
                 state["asked"].pop(video, None)
                 save_state(state)
 
-                if deleted or radarr_note.startswith("\n🎬"):
+                if deleted:
                     tg_answer_callback(cb_id, "🗑 Film eliminato")
                     if msg_id:
                         tg_edit_message(msg_id, f"✅ Eliminato: <b>{friendly_name(video)}</b>{radarr_note}")
@@ -8304,6 +8305,130 @@ def _progress_bar(current, total, width=10):
 download_queue = Queue()
 
 
+def _process_queue_job(job, state):
+    """Run a single job dict, exactly as _queue_worker's loop would.
+    Split out from the loop so integration tests can drain the queue
+    synchronously (call this per job) instead of racing a live thread."""
+    job_type = job.get("type", "single")
+    if job_type == "batch":
+        paths = job["paths"]
+        msg_id = job.get("msg_id")
+        log.info(f"  Queue: processing batch of {len(paths)} files")
+        do_batch_download(paths, state, progress_msg_id=msg_id)
+    elif job_type == "translate":
+        paths = job["paths"]
+        msg_id = job.get("msg_id")
+        log.info(f"  Queue: translating batch of {len(paths)} files")
+        do_batch_translate(paths, state, progress_msg_id=msg_id)
+    elif job_type == "sync":
+        query = job["query"]
+        msg_id = job.get("msg_id")
+        log.info(f"  Queue: sync '{query}'")
+        do_sync(query, state, progress_msg_id=msg_id)
+    elif job_type == "subeng":
+        query = job["query"]
+        msg_id = job.get("msg_id")
+        paths = job.get("paths")
+        log.info(f"  Queue: subeng '{query}' explicit_paths={len(paths) if paths is not None else 'no'}")
+        do_download_english(query, state, progress_msg_id=msg_id, paths=paths)
+    elif job_type == "translate_prep":
+        query = job["query"]
+        msg_id = job.get("msg_id")
+        log.info(f"  Queue: translate_prep '{query}'")
+        do_translate_prep(query, state, progress_msg_id=msg_id)
+    elif job_type == "retranslate":
+        query = job["query"]
+        msg_id = job.get("msg_id")
+        log.info(f"  Queue: retranslate '{query}'")
+        do_retranslate(query, state, progress_msg_id=msg_id)
+    elif job_type == "regista_search":
+        query = job["query"]
+        msg_id = job.get("msg_id")
+        log.info(f"  Queue: regista_search '{query}'")
+        do_regista_search(query, progress_msg_id=msg_id)
+    elif job_type == "scarica":
+        query = job["query"]
+        msg_id = job.get("msg_id")
+        lang = job.get("lang")
+        lang_source = job.get("lang_source")
+        log.info(f"  Queue: scarica '{query}' lang={lang} source={lang_source}")
+        do_scarica_search(query, progress_msg_id=msg_id, lang=lang, lang_source=lang_source)
+    elif job_type == "scarica_pick":
+        tmdb_id = job["tmdb_id"]
+        msg_id = job.get("msg_id")
+        cerca_fallback = job.get("cerca_fallback")
+        film_hash = str(abs(hash(("scarica", (tmdb_id,)))))[:8]
+        log.info(f"  Queue: scarica_pick tmdb_id={tmdb_id} ({job.get('title')}) fallback={bool(cerca_fallback)}")
+        do_scarica_releases(film_hash, tmdb_id, progress_msg_id=msg_id, cerca_fallback=cerca_fallback)
+    elif job_type == "cerca_search":
+        query = job["query"]
+        msg_id = job.get("msg_id")
+        director_hint = job.get("director_hint")
+        log.info(f"  Queue: cerca_search '{query}' director_hint={director_hint}")
+        do_cerca_search(query, progress_msg_id=msg_id, director_hint=director_hint)
+    elif job_type == "cerca_download":
+        film_hash = job["film_hash"]
+        result_idx = job["result_idx"]
+        msg_id = job.get("msg_id")
+        log.info(f"  Queue: cerca_download film_hash={film_hash} idx={result_idx}")
+        do_cerca_download(film_hash, result_idx, msg_id=msg_id)
+    elif job_type == "scarica_redo":
+        msg_id = job.get("msg_id")
+        log.info(
+            f"  Queue: scarica_redo tmdb_id={job.get('tmdb_id')} "
+            f"lang={job.get('lang')} excl={job.get('excluded_guid')}"
+        )
+        do_scarica_redo(
+            tmdb_id=job["tmdb_id"],
+            title=job["title"],
+            year=job.get("year"),
+            lang=job.get("lang"),
+            lang_source=job.get("lang_source"),
+            excluded_guid=job.get("excluded_guid"),
+            progress_msg_id=msg_id,
+        )
+    elif job_type == "cleanup":
+        msg_id = job.get("msg_id")
+        log.info("  Queue: cleanup placeholders")
+        do_cleanup(state, progress_msg_id=msg_id)
+    else:
+        video_path = job["path"]
+        msg_id = job.get("msg_id")
+        name = friendly_name(video_path)
+        log.info(f"  Queue: processing {os.path.basename(video_path)}")
+        trace = []
+        result = do_download(video_path, state, silent=True, translate=False, trace=trace)
+        if result is True and msg_id:
+            tg_edit_message(msg_id, f"✅ Sub ITA scaricato per:\n<b>{name}</b>")
+        elif result == "en_only" and msg_id:
+            en_srt = find_english_sub(video_path)
+            cost, blocks = (0, 0)
+            if en_srt:
+                with open(en_srt, "r", encoding="utf-8", errors="ignore") as f:
+                    cost, blocks = estimate_translation_cost(f.read())
+            tr_hash = str(abs(hash(video_path)))[:8]
+            batches = load_batches()
+            batches[tr_hash] = {"paths": [video_path], "type": "translate"}
+            save_batches(batches)
+            engine = _translation_engine_label()
+            keyboard = {"inline_keyboard": [
+                [
+                    {"text": f"🤖 Traduci (€{usd_to_eur(cost):.2f})", "callback_data": f"batch_translate:{tr_hash}"},
+                    {"text": "🇬🇧 Tieni ENG", "callback_data": f"batch_keep_en:{tr_hash}"},
+                ]
+            ]}
+            tg_edit_message(msg_id,
+                f"🇬🇧 Sub ENG trovato per:\n<b>{name}</b>\n\n"
+                f"💰 Tradurre in italiano? Costo: <b>€{usd_to_eur(cost):.2f}</b> ({blocks} blocchi)\n⚙️ Motore: {engine}",
+                reply_markup=keyboard)
+        elif not result and msg_id:
+            trace_text = format_search_trace(trace)
+            fail_msg = f"❌ Nessun sub ITA né ENG trovato per:\n<b>{name}</b>\nRiproverò tra 24h."
+            if trace_text:
+                fail_msg += f"\n\n<b>Tentativi:</b>\n{trace_text}"
+            tg_edit_message(msg_id, fail_msg)
+
+
 def _queue_worker(state_ref):
     """Background worker that processes download requests sequentially."""
     while True:
@@ -8312,125 +8437,8 @@ def _queue_worker(state_ref):
         except Empty:
             continue
         try:
-            job_type = job.get("type", "single")
             state = load_state()
-            if job_type == "batch":
-                paths = job["paths"]
-                msg_id = job.get("msg_id")
-                log.info(f"  Queue: processing batch of {len(paths)} files")
-                do_batch_download(paths, state, progress_msg_id=msg_id)
-            elif job_type == "translate":
-                paths = job["paths"]
-                msg_id = job.get("msg_id")
-                log.info(f"  Queue: translating batch of {len(paths)} files")
-                do_batch_translate(paths, state, progress_msg_id=msg_id)
-            elif job_type == "sync":
-                query = job["query"]
-                msg_id = job.get("msg_id")
-                log.info(f"  Queue: sync '{query}'")
-                do_sync(query, state, progress_msg_id=msg_id)
-            elif job_type == "subeng":
-                query = job["query"]
-                msg_id = job.get("msg_id")
-                paths = job.get("paths")
-                log.info(f"  Queue: subeng '{query}' explicit_paths={len(paths) if paths is not None else 'no'}")
-                do_download_english(query, state, progress_msg_id=msg_id, paths=paths)
-            elif job_type == "translate_prep":
-                query = job["query"]
-                msg_id = job.get("msg_id")
-                log.info(f"  Queue: translate_prep '{query}'")
-                do_translate_prep(query, state, progress_msg_id=msg_id)
-            elif job_type == "retranslate":
-                query = job["query"]
-                msg_id = job.get("msg_id")
-                log.info(f"  Queue: retranslate '{query}'")
-                do_retranslate(query, state, progress_msg_id=msg_id)
-            elif job_type == "regista_search":
-                query = job["query"]
-                msg_id = job.get("msg_id")
-                log.info(f"  Queue: regista_search '{query}'")
-                do_regista_search(query, progress_msg_id=msg_id)
-            elif job_type == "scarica":
-                query = job["query"]
-                msg_id = job.get("msg_id")
-                lang = job.get("lang")
-                lang_source = job.get("lang_source")
-                log.info(f"  Queue: scarica '{query}' lang={lang} source={lang_source}")
-                do_scarica_search(query, progress_msg_id=msg_id, lang=lang, lang_source=lang_source)
-            elif job_type == "scarica_pick":
-                tmdb_id = job["tmdb_id"]
-                msg_id = job.get("msg_id")
-                cerca_fallback = job.get("cerca_fallback")
-                film_hash = str(abs(hash(("scarica", (tmdb_id,)))))[:8]
-                log.info(f"  Queue: scarica_pick tmdb_id={tmdb_id} ({job.get('title')}) fallback={bool(cerca_fallback)}")
-                do_scarica_releases(film_hash, tmdb_id, progress_msg_id=msg_id, cerca_fallback=cerca_fallback)
-            elif job_type == "cerca_search":
-                query = job["query"]
-                msg_id = job.get("msg_id")
-                director_hint = job.get("director_hint")
-                log.info(f"  Queue: cerca_search '{query}' director_hint={director_hint}")
-                do_cerca_search(query, progress_msg_id=msg_id, director_hint=director_hint)
-            elif job_type == "cerca_download":
-                film_hash = job["film_hash"]
-                result_idx = job["result_idx"]
-                msg_id = job.get("msg_id")
-                log.info(f"  Queue: cerca_download film_hash={film_hash} idx={result_idx}")
-                do_cerca_download(film_hash, result_idx, msg_id=msg_id)
-            elif job_type == "scarica_redo":
-                msg_id = job.get("msg_id")
-                log.info(
-                    f"  Queue: scarica_redo tmdb_id={job.get('tmdb_id')} "
-                    f"lang={job.get('lang')} excl={job.get('excluded_guid')}"
-                )
-                do_scarica_redo(
-                    tmdb_id=job["tmdb_id"],
-                    title=job["title"],
-                    year=job.get("year"),
-                    lang=job.get("lang"),
-                    lang_source=job.get("lang_source"),
-                    excluded_guid=job.get("excluded_guid"),
-                    progress_msg_id=msg_id,
-                )
-            elif job_type == "cleanup":
-                msg_id = job.get("msg_id")
-                log.info("  Queue: cleanup placeholders")
-                do_cleanup(state, progress_msg_id=msg_id)
-            else:
-                video_path = job["path"]
-                msg_id = job.get("msg_id")
-                name = friendly_name(video_path)
-                log.info(f"  Queue: processing {os.path.basename(video_path)}")
-                trace = []
-                result = do_download(video_path, state, silent=True, translate=False, trace=trace)
-                if result is True and msg_id:
-                    tg_edit_message(msg_id, f"✅ Sub ITA scaricato per:\n<b>{name}</b>")
-                elif result == "en_only" and msg_id:
-                    en_srt = find_english_sub(video_path)
-                    cost, blocks = (0, 0)
-                    if en_srt:
-                        with open(en_srt, "r", encoding="utf-8", errors="ignore") as f:
-                            cost, blocks = estimate_translation_cost(f.read())
-                    tr_hash = str(abs(hash(video_path)))[:8]
-                    batches = load_batches()
-                    batches[tr_hash] = {"paths": [video_path], "type": "translate"}
-                    save_batches(batches)
-                    engine = _translation_engine_label()
-                    keyboard = {"inline_keyboard": [
-                        [
-                            {"text": f"🤖 Traduci (€{usd_to_eur(cost):.2f})", "callback_data": f"batch_translate:{tr_hash}"},
-                            {"text": "🇬🇧 Tieni ENG", "callback_data": f"batch_keep_en:{tr_hash}"},
-                        ]
-                    ]}
-                    tg_edit_message(msg_id,
-                        f"🇬🇧 Sub ENG trovato per:\n<b>{name}</b>\n\n"
-                        f"💰 Tradurre in italiano? Costo: <b>€{usd_to_eur(cost):.2f}</b> ({blocks} blocchi)\n⚙️ Motore: {engine}",
-                        reply_markup=keyboard)
-                elif not result and msg_id:
-                    trace_text = format_search_trace(trace)
-                    fail_msg = f"❌ Nessun sub ITA né ENG trovato per:\n<b>{name}</b>\nRiproverò tra 24h."
-                    if trace_text:
-                        fail_msg += f"\n\n<b>Tentativi:</b>\n{trace_text}"
-                    tg_edit_message(msg_id, fail_msg)
+            _process_queue_job(job, state)
         except Exception as e:
             log.error(f"  Queue worker error: {e}", exc_info=True)
         finally:
