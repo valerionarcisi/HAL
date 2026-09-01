@@ -12,6 +12,7 @@ import importlib
 import io
 import zipfile
 import urllib.request
+import urllib.error
 import json
 
 # Setup: create a temp /config-like directory and patch the module
@@ -1940,6 +1941,62 @@ class TestClaudeBisectFallback(unittest.TestCase):
         self.assertEqual(set(result["translations"].keys()), {0, 1})
         self.assertEqual(result["translations"][0], "Zero")
         self.assertEqual(result["translations"][1], "One")
+
+    def test_reasoning_disabled_in_request_payload(self):
+        """DeepSeek-class models on OpenRouter burn max_tokens on hidden
+        reasoning unless explicitly told not to — the request must always
+        ask for reasoning to be off, or content comes back empty."""
+        original_urlopen = urllib.request.urlopen
+        captured_payload = {}
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {"content": "[0] Ciao"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+                }).encode("utf-8")
+
+        def fake_urlopen(req, timeout=None):
+            captured_payload.update(json.loads(req.data.decode("utf-8")))
+            return FakeResponse()
+
+        urllib.request.urlopen = fake_urlopen
+        prev_key = hal.CLAUDE_API_KEY
+        hal.CLAUDE_API_KEY = "test"
+        try:
+            hal._claude_translate_call([(0, "Hello")], "Test")
+        finally:
+            urllib.request.urlopen = original_urlopen
+            hal.CLAUDE_API_KEY = prev_key
+
+        self.assertEqual(captured_payload.get("reasoning"), {"enabled": False})
+
+    def test_http_error_body_is_logged(self):
+        """A failed call must surface the provider's error body (e.g. 'credit
+        balance too low'), not just the bare HTTP status — that message is
+        the only way to tell a billing problem from a transport problem."""
+        original_urlopen = urllib.request.urlopen
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", hdrs=None,
+                fp=io.BytesIO(b'{"error":{"message":"credit balance too low"}}'),
+            )
+
+        urllib.request.urlopen = fake_urlopen
+        prev_key = hal.CLAUDE_API_KEY
+        hal.CLAUDE_API_KEY = "test"
+        try:
+            with self.assertLogs(hal.log, level="ERROR") as cm:
+                result = hal._claude_translate_call([(0, "Hello")], "Test")
+        finally:
+            urllib.request.urlopen = original_urlopen
+            hal.CLAUDE_API_KEY = prev_key
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("credit balance too low" in msg for msg in cm.output))
 
 
 class TestRadarrReleaseParsing(unittest.TestCase):
