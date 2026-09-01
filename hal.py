@@ -3785,13 +3785,18 @@ def _claude_translate_bisect(indexed_texts, video_name, depth=0):
     }
 
 
-def translate_srt_with_claude(srt_content, video_name):
+def translate_srt_with_claude(srt_content, video_name, progress_msg_id=None):
     """Translate SRT content from English to Italian using Claude API.
     Batches of 40 cues with automatic bisect-on-failure: if Claude truncates
     or skips any cue, the batch is recursively split until every cue is
     translated (or — in the worst case — a single cue persistently fails and
     is left in English, which is the only way a missing translation can ever
-    survive). Returns the translated SRT string."""
+    survive). Returns the translated SRT string.
+
+    If progress_msg_id is given, the Telegram message is updated every couple
+    of batches — without it, a single-file fallback translation (e.g. 40
+    batches on a full-length film) leaves the existing per-file progress bar
+    frozen at 0% for the whole run, which reads as stuck rather than working."""
 
     if not CLAUDE_API_KEY:
         log.error("CLAUDE_API_KEY not set, cannot translate")
@@ -3808,16 +3813,24 @@ def translate_srt_with_claude(srt_content, video_name):
     translated_blocks = []
     total_in = 0
     total_out = 0
+    total_batches = (len(blocks) + BATCH_SIZE - 1) // BATCH_SIZE
 
     for batch_start in range(0, len(blocks), BATCH_SIZE):
         batch = blocks[batch_start:batch_start + BATCH_SIZE]
         batch_num = batch_start // BATCH_SIZE + 1
-        total_batches = (len(blocks) + BATCH_SIZE - 1) // BATCH_SIZE
 
         indexed = [(i, text) for i, (_, _, text) in enumerate(batch) if text.strip()]
         if not indexed:
             translated_blocks.extend(batch)
             continue
+
+        if progress_msg_id and (batch_num % 2 == 1 or batch_num == total_batches):
+            bar = _progress_bar(batch_num - 1, total_batches)
+            tg_edit_message(progress_msg_id,
+                f"🤖 <b>Traducendo EN→IT...</b>\n\n"
+                f"{bar}\n"
+                f"📊 Blocco {batch_num}/{total_batches}\n"
+                f"<i>{html.escape(video_name)}</i>")
 
         res = _claude_translate_bisect(indexed, video_name)
         translations = res["translations"]
@@ -4110,7 +4123,7 @@ def polish_translation_with_claude(en_blocks, it_blocks, video_name):
     return polished, len(rewrites)
 
 
-def translate_srt(srt_content, video_name):
+def translate_srt(srt_content, video_name, progress_msg_id=None):
     """Primary EN->IT translation entry point.
     Strategy: DeepL (cue-by-cue, no truncation) + optional Claude polish pass.
     Falls back to full Claude translation if DeepL is unavailable.
@@ -4129,7 +4142,7 @@ def translate_srt(srt_content, video_name):
         log.warning("  DeepL translation failed, falling back to Claude full-translate")
         _notify_deepl_fallback_once()
 
-    return translate_srt_with_claude(srt_content, video_name)
+    return translate_srt_with_claude(srt_content, video_name, progress_msg_id=progress_msg_id)
 
 
 _deepl_fallback_message_sent = False  # only tell Telegram about the fallback once per HAL run
@@ -4392,7 +4405,7 @@ def check_translation_quality(eng_srt, it_srt):
     return True, None
 
 
-def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=False):
+def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=False, progress_msg_id=None):
     """Translate English content to Italian and save. Returns True on success.
     Also saves the English subtitle as .en.srt alongside the Italian one.
     skip_sync=True when the English sub is already local (timecodes match the video)."""
@@ -4426,7 +4439,7 @@ def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=
     else:
         log.info(f"  Estimated Claude translation cost: ${est_cost:.4f} ({num_blocks} blocks)")
 
-    translated_srt = translate_srt(eng_text, video_name)
+    translated_srt = translate_srt(eng_text, video_name, progress_msg_id=progress_msg_id)
 
     if not translated_srt:
         log.error(f"  Translation failed for: {os.path.basename(video_path)}")
@@ -8243,7 +8256,7 @@ def do_batch_translate(paths, state, progress_msg_id=None):
                 f"{bar}\n"
                 f"📊 {i}/{total} — ✅ {success} | ❌ {failed}")
 
-        if _translate_and_save(en_srt, video_path, state, silent=True, skip_sync=True):
+        if _translate_and_save(en_srt, video_path, state, silent=True, skip_sync=True, progress_msg_id=progress_msg_id):
             success += 1
             success_names.append(friendly_name(video_path))
         else:

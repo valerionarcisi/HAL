@@ -2243,6 +2243,70 @@ class TestClaudeBisectFallback(unittest.TestCase):
         self.assertTrue(any("credit balance too low" in msg for msg in cm.output))
 
 
+class TestTranslateProgressUpdates(unittest.TestCase):
+    """A single long film can take dozens of internal batches to translate
+    via the Claude fallback — without a progress_msg_id wired through, the
+    existing per-file progress bar stays frozen at 0% for the whole run,
+    which reads as stuck. translate_srt_with_claude must push per-batch
+    updates when given a message to edit."""
+
+    def _srt_with_n_cues(self, n):
+        parts = []
+        for i in range(1, n + 1):
+            parts.append(f"{i}\n00:00:{i:02d},000 --> 00:00:{i+1:02d},000\nLine {i}\n")
+        return "\n".join(parts)
+
+    def test_updates_telegram_across_multiple_batches(self):
+        from unittest.mock import patch
+        edits = []
+
+        def fake_bisect(indexed_texts, video_name, depth=0):
+            return {
+                "translations": {i: f"Riga {i}" for i, _ in indexed_texts},
+                "input_tokens": 10, "output_tokens": 10,
+            }
+
+        prev_key = hal.CLAUDE_API_KEY
+        hal.CLAUDE_API_KEY = "test"
+        try:
+            with patch.object(hal, "_claude_translate_bisect", side_effect=fake_bisect), \
+                 patch.object(hal, "tg_edit_message", side_effect=lambda *a, **k: edits.append(a)):
+                hal.translate_srt_with_claude(
+                    self._srt_with_n_cues(120), "Test Movie", progress_msg_id=999,
+                )
+        finally:
+            hal.CLAUDE_API_KEY = prev_key
+
+        # 120 cues / 40 per batch = 3 batches; updates fire on odd batch_num
+        # and always on the last one, so batch 1 and batch 3 (last) — not 0.
+        self.assertGreaterEqual(len(edits), 2)
+        self.assertTrue(any(e[0] == 999 for e in edits))
+        joined = str(edits)
+        self.assertIn("Blocco 1/3", joined)
+        self.assertIn("Blocco 3/3", joined)
+
+    def test_no_progress_msg_id_sends_nothing(self):
+        from unittest.mock import patch
+        edits = []
+
+        def fake_bisect(indexed_texts, video_name, depth=0):
+            return {
+                "translations": {i: f"Riga {i}" for i, _ in indexed_texts},
+                "input_tokens": 10, "output_tokens": 10,
+            }
+
+        prev_key = hal.CLAUDE_API_KEY
+        hal.CLAUDE_API_KEY = "test"
+        try:
+            with patch.object(hal, "_claude_translate_bisect", side_effect=fake_bisect), \
+                 patch.object(hal, "tg_edit_message", side_effect=lambda *a, **k: edits.append(a)):
+                hal.translate_srt_with_claude(self._srt_with_n_cues(50), "Test Movie")
+        finally:
+            hal.CLAUDE_API_KEY = prev_key
+
+        self.assertEqual(edits, [])
+
+
 class TestRadarrReleaseParsing(unittest.TestCase):
     """Verify language detection and ranking on synthetic Radarr release payloads."""
 
