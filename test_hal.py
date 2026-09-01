@@ -1826,13 +1826,12 @@ class TestClaudeBisectFallback(unittest.TestCase):
     """Verify the Claude fallback recovers from truncation/missing cues by
     bisecting the batch instead of silently leaving cues in English."""
 
-    def _make_response(self, translations, stop_reason="end_turn"):
-        """Build a fake Claude API response body."""
+    def _make_response(self, translations, finish_reason="stop"):
+        """Build a fake OpenRouter chat-completions response body."""
         text = "\n".join(f"[{i}] {v}" for i, v in translations.items())
         return {
-            "content": [{"type": "text", "text": text}],
-            "usage": {"input_tokens": 100, "output_tokens": 50},
-            "stop_reason": stop_reason,
+            "choices": [{"message": {"content": text}, "finish_reason": finish_reason}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
         }
 
     def test_all_cues_translated_no_retry(self):
@@ -1920,9 +1919,11 @@ class TestClaudeBisectFallback(unittest.TestCase):
 
         def fake_urlopen(req, timeout=None):
             return FakeResponse({
-                "content": [{"type": "text", "text": "[0] Zero\n[1] One\n[99] hallucinated\n"}],
-                "usage": {"input_tokens": 10, "output_tokens": 10},
-                "stop_reason": "end_turn",
+                "choices": [{
+                    "message": {"content": "[0] Zero\n[1] One\n[99] hallucinated\n"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10},
             })
 
         urllib.request.urlopen = fake_urlopen
@@ -2171,9 +2172,11 @@ class TestHtmlEntitiesUnescapedInTranslation(unittest.TestCase):
 
         resp = MagicMock()
         resp.read.return_value = json.dumps({
-            "content": [{"type": "text", "text": "[0] L&#x27;ora &amp; il momento"}],
-            "usage": {"input_tokens": 1, "output_tokens": 1},
-            "stop_reason": "end_turn",
+            "choices": [{
+                "message": {"content": "[0] L&#x27;ora &amp; il momento"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }).encode()
         resp.__enter__ = lambda s: s
         resp.__exit__ = lambda *a: None

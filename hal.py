@@ -67,11 +67,11 @@ TMDB_API_URL = "https://api.themoviedb.org/3"
 # SubSource (third subtitle provider)
 SUBSOURCE_API_URL = "https://api.subsource.net/v1"
 
-# Claude API for translation (EN -> IT fallback / polish pass)
+# LLM API for translation (EN -> IT fallback / polish pass), via OpenRouter.
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-CLAUDE_POLISH_MODEL = os.environ.get("CLAUDE_POLISH_MODEL", "claude-haiku-4-5-20251001")
-CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "deepseek/deepseek-v4-flash")
+CLAUDE_POLISH_MODEL = os.environ.get("CLAUDE_POLISH_MODEL", "deepseek/deepseek-v4-flash")
+CLAUDE_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # DeepL API for primary EN -> IT translation (cue-by-cue, no truncation risk)
 DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "")
@@ -3636,31 +3636,33 @@ def _claude_translate_call(indexed_texts, video_name):
         "model": CLAUDE_MODEL,
         "max_tokens": 8192,
         "messages": [{"role": "user", "content": prompt}],
+        "reasoning": {"enabled": False},  # keep the response in `content`, not burned on reasoning tokens
     }).encode("utf-8")
     req = urllib.request.Request(
         CLAUDE_API_URL,
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "x-api-key": CLAUDE_API_KEY,
-            "anthropic-version": "2023-06-01",
+            "Authorization": f"Bearer {CLAUDE_API_KEY}",
         },
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        log.error(f"  Claude call failed: {e} — {body}")
+        return {"translations": {}, "input_tokens": 0, "output_tokens": 0, "truncated": False, "ok": False}
     except Exception as e:
         log.error(f"  Claude call failed: {e}")
         return {"translations": {}, "input_tokens": 0, "output_tokens": 0, "truncated": False, "ok": False}
 
     usage = result.get("usage", {})
-    in_tokens = usage.get("input_tokens", 0)
-    out_tokens = usage.get("output_tokens", 0)
+    in_tokens = usage.get("prompt_tokens", 0)
+    out_tokens = usage.get("completion_tokens", 0)
 
-    raw = ""
-    for chunk in result.get("content", []):
-        if chunk.get("type") == "text":
-            raw += chunk["text"]
+    choice = (result.get("choices") or [{}])[0]
+    raw = (choice.get("message") or {}).get("content") or ""
 
     parsed = {}
     for line in raw.strip().split("\n"):
@@ -3671,7 +3673,7 @@ def _claude_translate_call(indexed_texts, video_name):
             if idx in asked:
                 parsed[idx] = m.group(2)
 
-    truncated = result.get("stop_reason") == "max_tokens"
+    truncated = choice.get("finish_reason") == "length"
     # When Claude was cut off, the *last* parsed line is the dangerous one
     # (may be half a sentence). Drop it so the bisect retry will re-translate it.
     if truncated and parsed:
@@ -3977,6 +3979,7 @@ def polish_translation_with_claude(en_blocks, it_blocks, video_name):
                 "model": CLAUDE_POLISH_MODEL,
                 "max_tokens": 8192,
                 "messages": [{"role": "user", "content": prompt}],
+                "reasoning": {"enabled": False},
             }).encode("utf-8")
 
             req = urllib.request.Request(
@@ -3984,21 +3987,18 @@ def polish_translation_with_claude(en_blocks, it_blocks, video_name):
                 data=payload,
                 headers={
                     "Content-Type": "application/json",
-                    "x-api-key": CLAUDE_API_KEY,
-                    "anthropic-version": "2023-06-01",
+                    "Authorization": f"Bearer {CLAUDE_API_KEY}",
                 },
             )
             with urllib.request.urlopen(req, timeout=120) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
 
             usage = result.get("usage", {})
-            total_in += usage.get("input_tokens", 0)
-            total_out += usage.get("output_tokens", 0)
+            total_in += usage.get("prompt_tokens", 0)
+            total_out += usage.get("completion_tokens", 0)
 
-            text = ""
-            for chunk in result.get("content", []):
-                if chunk.get("type") == "text":
-                    text += chunk["text"]
+            choice = (result.get("choices") or [{}])[0]
+            text = (choice.get("message") or {}).get("content") or ""
 
             parsed_in_batch = {}
             for line in text.strip().split("\n"):
@@ -4016,7 +4016,7 @@ def polish_translation_with_claude(en_blocks, it_blocks, video_name):
                     parsed_in_batch[int(m.group(1))] = html.unescape(raw)
 
             # If the model was cut off, drop the last rewrite — it may be truncated.
-            if result.get("stop_reason") == "max_tokens" and parsed_in_batch:
+            if choice.get("finish_reason") == "length" and parsed_in_batch:
                 last_idx = max(parsed_in_batch)
                 log.warning(f"  Polish batch {batch_num}/{total_batches} hit max_tokens; dropping cue [{last_idx}]")
                 del parsed_in_batch[last_idx]
@@ -4025,6 +4025,9 @@ def polish_translation_with_claude(en_blocks, it_blocks, video_name):
             log.info(f"  Polish batch {batch_num}/{total_batches}: {len(parsed_in_batch)} rewrites")
             time.sleep(0.5)
 
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore")
+            log.error(f"  Polish error (batch {batch_num}): {e} — {body} — keeping DeepL output for this batch")
         except Exception as e:
             log.error(f"  Polish error (batch {batch_num}): {e} — keeping DeepL output for this batch")
 
