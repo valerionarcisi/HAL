@@ -4589,7 +4589,11 @@ def format_search_trace(trace):
 
 def do_download(video_path, state, silent=False, translate=True, trace=None):
     """Search and download subtitle for a video file.
-    Returns: True (ITA found), "en_only" (EN saved, needs translation), False (nothing found).
+    Returns: (True, source_label) if ITA found, ("en_only", None) if only EN
+    saved (needs translation), (False, None) if nothing found. source_label
+    is a short human string ("Subdl.com", "OpenSubtitles.com", the engine
+    name for a translation, ...) — shown to the user so they know where a
+    sub came from, not just that one was found.
     When translate=False, downloads EN sub but does NOT translate (saves money, user decides later).
     If trace is a list, it is populated with per-attempt search entries."""
     fname = os.path.basename(video_path)
@@ -4609,7 +4613,7 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
             _save_sub_and_update_state(video_path, sub_path, f"existing file: {os.path.basename(existing['path'])}", state)
             if not silent:
                 tg_send(f"✅ Sub ITA trovato nella cartella:\n<b>{friendly_name(video_path)}</b>")
-            return True
+            return True, "file esistente"
         elif existing["lang"] == "en":
             en_srt_path = os.path.splitext(video_path)[0] + ".en.srt"
             if existing["path"] != en_srt_path:
@@ -4619,9 +4623,10 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
             if translate and (DEEPL_API_KEY or CLAUDE_API_KEY):
                 log.info(f"  Translating existing EN sub...")
                 if _translate_and_save(en_srt_path, video_path, state, silent=silent, skip_sync=True):
-                    return True
+                    source = state.get("downloaded", {}).get(video_path, {}).get("source", "traduzione")
+                    return True, source
             else:
-                return "en_only"
+                return "en_only", None
 
     # =================================================================
     # STEP 1: Search & save ITA (if available + sync OK)
@@ -4653,8 +4658,8 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
             files = f"📁 {os.path.basename(sub_path)}"
             if eng_saved:
                 files += f"\n📁 {os.path.basename(en_srt_path)}"
-            tg_send(f"✅ Sub ITA scaricato:\n<b>{friendly_name(video_path)}</b>\n{files}")
-        return True
+            tg_send(f"✅ Sub ITA scaricato ({ita_saved}):\n<b>{friendly_name(video_path)}</b>\n{files}")
+        return True, ita_saved
 
     # No ITA — fall through to ENG-only path
     if not eng_saved:
@@ -4667,19 +4672,22 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
             if trace_text:
                 msg += f"\n\n<b>Tentativi:</b>\n{trace_text}"
             tg_send(msg)
-        return False
+        return False, None
 
     # Only ENG was saved — caller decides about translation
     log.info(f"  ✅ EN sub saved (no ITA found, translation deferred)")
     if translate and (DEEPL_API_KEY or CLAUDE_API_KEY):
         if _translate_and_save(en_srt_path, video_path, state, silent=silent, skip_sync=True):
-            return True
-    return "en_only"
+            source = state.get("downloaded", {}).get(video_path, {}).get("source", "traduzione")
+            return True, source
+    return "en_only", None
 
 
 def _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trace):
     """Search ITA on Subdl then OpenSubtitles, validate sync, save .it.srt.
-    Returns True if a synced ITA sub was saved."""
+    Returns the short source label ("Subdl.com" / "OpenSubtitles.com") if a
+    synced ITA sub was saved, None otherwise — shown to the user in the
+    Telegram success message so they know where a sub came from."""
     # --- Subdl ITA ---
     ita_content = subdl.search_and_download(video_path, language="it", trace=trace)
     if ita_content:
@@ -4687,7 +4695,7 @@ def _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trac
         if sync_result and sync_result.get("ok"):
             _save_sub_and_update_state(video_path, sub_path, "Subdl.com", state)
             log.info(f"  ✅ Saved ITA (Subdl, sync score {sync_result['score']:.0f}): {os.path.basename(sub_path)}")
-            return True
+            return "Subdl.com"
         score_val = sync_result.get("score", "?") if isinstance(sync_result, dict) else "N/A"
         log.warning(f"  Subdl ITA sync score too low ({score_val}), discarding")
         if trace is not None:
@@ -4710,7 +4718,7 @@ def _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trac
                     _save_sub_and_update_state(video_path, sub_path,
                                                f"OpenSubtitles: {best.get('SubFileName', '')}", state)
                     log.info(f"  ✅ Saved ITA (OS, sync score {sync_result['score']:.0f}): {os.path.basename(sub_path)}")
-                    return True
+                    return "OpenSubtitles.com"
                 score_val = sync_result.get("score", "?") if isinstance(sync_result, dict) else "N/A"
                 log.warning(f"  OS ITA sync score too low ({score_val}), discarding")
                 if trace is not None:
@@ -4719,7 +4727,7 @@ def _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trac
                                   "rejected": f"sync score troppo basso ({score_val})"})
         except Exception as e:
             log.error(f"  OpenSubtitles ITA error: {e}")
-    return False
+    return None
 
 
 def _try_save_eng(subdl, client, os_logged_in, video_path, en_srt_path, trace):
@@ -8001,10 +8009,10 @@ def do_batch_download(paths, state, progress_msg_id=None):
                 time.sleep(1)
                 continue
 
-            result = do_download(video_path, state, silent=True, translate=False)
+            result, source = do_download(video_path, state, silent=True, translate=False)
             if result is True:
                 ita_found += 1
-                ita_names.append(friendly_name(video_path))
+                ita_names.append(f"{friendly_name(video_path)} ({source})" if source else friendly_name(video_path))
             elif result == "en_only":
                 en_found += 1
                 en_paths.append(video_path)
@@ -8356,7 +8364,7 @@ def do_batch_translate(paths, state, progress_msg_id=None):
 
     summary = f"🤖 <b>Traduzione completata</b>\n\n"
     summary += f"✅ Tradotti: {success}/{total}\n❌ Falliti: {failed}/{total}\n"
-    summary += f"💰 Costo totale sessione: ${total_spent:.4f}"
+    summary += f"💰 Costo totale sessione: €{usd_to_eur(total_spent):.4f}"
 
     if success_names and len(success_names) <= 10:
         summary += "\n\n<b>Tradotti:</b>\n" + "\n".join(f"  ✅ {n}" for n in success_names)
@@ -8482,9 +8490,10 @@ def _process_queue_job(job, state):
         name = friendly_name(video_path)
         log.info(f"  Queue: processing {os.path.basename(video_path)}")
         trace = []
-        result = do_download(video_path, state, silent=True, translate=False, trace=trace)
+        result, source = do_download(video_path, state, silent=True, translate=False, trace=trace)
         if result is True and msg_id:
-            tg_edit_message(msg_id, f"✅ Sub ITA scaricato per:\n<b>{name}</b>")
+            source_label = f" ({source})" if source else ""
+            tg_edit_message(msg_id, f"✅ Sub ITA scaricato{source_label} per:\n<b>{name}</b>")
         elif result == "en_only" and msg_id:
             en_srt = find_english_sub(video_path)
             cost, blocks = (0, 0)

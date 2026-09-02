@@ -1232,7 +1232,7 @@ class TestQueueWorkerSingleJobNoDuplicateMessages(unittest.TestCase):
 
         def fake_do_download(video_path, state, **kwargs):
             captured["kwargs"] = kwargs
-            return do_download_result
+            return do_download_result, None
 
         # Drain any leftover items so the worker picks up our job first
         while True:
@@ -1379,7 +1379,7 @@ class TestSyncValidationCascade(unittest.TestCase):
              patch.object(hal, "_save_sub_and_update_state"), \
              patch.object(hal, "save_state"), \
              patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
-            result = hal.do_download(video, state, silent=True, translate=False)
+            result, _source = hal.do_download(video, state, silent=True, translate=False)
 
         shutil.rmtree(tmp)
         return result
@@ -1426,7 +1426,7 @@ class TestSyncValidationCascade(unittest.TestCase):
                  patch.object(hal, "_save_sub_and_update_state"), \
                  patch.object(hal, "save_state"), \
                  patch.object(hal, "tg_send"):
-                result = hal.do_download(video, state, silent=True, translate=False)
+                result, _source = hal.do_download(video, state, silent=True, translate=False)
             self.assertTrue(result)
             # Both .it.srt and .en.srt were written
             self.assertTrue(any(p.endswith(".it.srt") for p in saved_paths))
@@ -1461,6 +1461,46 @@ class TestSyncValidationCascade(unittest.TestCase):
             eng_sync_ok=False,
         )
         self.assertFalse(result)
+
+    def test_source_label_names_the_provider(self):
+        """do_download must tell the caller WHERE a sub came from, not just
+        that one was found — this is what the Telegram success message
+        shows, per the user's explicit request to always see the source."""
+        from unittest.mock import patch, MagicMock
+        tmp = tempfile.mkdtemp()
+        video = os.path.join(tmp, "Film.2024.mkv")
+        open(video, "w").close()
+
+        def fake_validate(vp, content, dest):
+            if dest.endswith(".it.srt"):
+                with open(dest, "wb") as f:
+                    f.write(content if isinstance(content, bytes) else content.encode())
+                return {"ok": True, "score": 900.0}
+            return {"ok": False, "score": 0.0}
+
+        subdl_mock = MagicMock()
+        subdl_mock.search_and_download = MagicMock(
+            side_effect=lambda vp, language="it", trace=None:
+                b"1\n00:00:01,000 --> 00:00:02,000\nCiao\n" if language == "it" else None
+        )
+        os_client = MagicMock()
+        os_client.login.return_value = False
+        os_client.available = False
+
+        state = {"asked": {}, "downloaded": {}}
+        try:
+            with patch.object(hal, "SubdlClient", return_value=subdl_mock), \
+                 patch.object(hal, "OSClient", return_value=os_client), \
+                 patch.object(hal, "validate_sync", side_effect=fake_validate), \
+                 patch.object(hal, "find_existing_srt", return_value=None), \
+                 patch.object(hal, "_save_sub_and_update_state"), \
+                 patch.object(hal, "save_state"), \
+                 patch.object(hal, "tg_send"):
+                result, source = hal.do_download(video, state, silent=True, translate=False)
+            self.assertTrue(result)
+            self.assertEqual(source, "Subdl.com")
+        finally:
+            shutil.rmtree(tmp)
 
 
 class TestSearchTrace(unittest.TestCase):
