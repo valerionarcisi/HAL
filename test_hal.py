@@ -2187,6 +2187,59 @@ class TestClaudeBisectFallback(unittest.TestCase):
         self.assertEqual(result["translations"][0], "Zero")
         self.assertEqual(result["translations"][1], "One")
 
+    def test_two_line_cue_survives_translation_round_trip(self):
+        """Real bug found reviewing The Beloved's translation: a two-line
+        subtitle like 'Sparkling water,\\nwith ice and lemon, please.' was
+        sent to the model with its internal newline looking exactly like the
+        boundary between two different [N] cues. The response parser then
+        kept only the first physical line of the reply (whichever [N] line
+        matched the regex) and silently dropped the second — every two-line
+        cue in the film lost half its dialogue. The fix collapses internal
+        newlines behind a ⏎ marker before sending, and restores them after
+        parsing, so a two-line cue is never mistaken for two separate cues."""
+        original_urlopen = urllib.request.urlopen
+        captured_payload = {}
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self):
+                return json.dumps({
+                    "choices": [{
+                        "message": {"content": "[0] Acqua frizzante, ⏎ con ghiaccio e limone, per favore."},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+                }).encode("utf-8")
+
+        def fake_urlopen(req, timeout=None):
+            captured_payload["body"] = req.data.decode("utf-8")
+            return FakeResponse()
+
+        urllib.request.urlopen = fake_urlopen
+        prev_key = hal.CLAUDE_API_KEY
+        hal.CLAUDE_API_KEY = "test"
+        try:
+            result = hal._claude_translate_call(
+                [(0, "Sparkling water,\nwith ice and lemon, please.")], "Test",
+            )
+        finally:
+            urllib.request.urlopen = original_urlopen
+            hal.CLAUDE_API_KEY = prev_key
+
+        # The internal newline must never appear as a bare line in the outgoing
+        # prompt — that's exactly what made the parser mistake it for a new cue.
+        sent_text_block = json.loads(captured_payload["body"])["messages"][0]["content"]
+        self.assertNotIn("with ice and lemon, please.\n", sent_text_block)
+        self.assertIn("⏎", sent_text_block)
+
+        # Both lines of the translation must survive, joined back with a real
+        # newline — this is the actual content-loss bug.
+        self.assertEqual(
+            result["translations"][0],
+            "Acqua frizzante,\ncon ghiaccio e limone, per favore.",
+        )
+
     def test_reasoning_disabled_in_request_payload(self):
         """DeepSeek-class models on OpenRouter burn max_tokens on hidden
         reasoning unless explicitly told not to — the request must always

@@ -3650,11 +3650,18 @@ def _claude_translate_call(indexed_texts, video_name):
         return {"translations": {}, "input_tokens": 0, "output_tokens": 0, "truncated": False, "ok": True}
 
     asked = {i for i, _ in indexed_texts}
-    text_block = "\n".join(f"[{i}] {t}" for i, t in indexed_texts)
+    # A cue's own line breaks (two-line subtitles, common when a sentence is
+    # split for on-screen readability) must never look like a new [N] line to
+    # the response parser below — collapse them behind a marker that survives
+    # a round trip through the model, then restore them after parsing.
+    text_block = "\n".join(f"[{i}] {t.replace(chr(10), ' ⏎ ')}" for i, t in indexed_texts)
     prompt = (
         f"Translate these movie subtitles from English to Italian. "
         f"Movie: {video_name}. "
-        f"Keep the [N] numbering prefix on each line. "
+        f"Keep the [N] numbering prefix on each line — each cue is exactly one "
+        f"line of output, even if it contains a ⏎ marker (a line break inside "
+        f"the original two-line subtitle: keep it in the same position, translated "
+        f"around it, never drop the text after it). "
         f"Translate naturally — use colloquial Italian as it would appear in a real Italian dub. "
         f"Keep it concise as subtitles should be. "
         f"Do NOT add any explanation, just output the translated lines.\n\n"
@@ -3699,7 +3706,8 @@ def _claude_translate_call(indexed_texts, video_name):
             idx = int(m.group(1))
             # Reject hallucinated indices — only keep cues we actually asked for.
             if idx in asked:
-                parsed[idx] = m.group(2)
+                # Restore the original two-line layout the ⏎ marker stood in for.
+                parsed[idx] = re.sub(r"\s*⏎\s*", "\n", m.group(2))
 
     truncated = choice.get("finish_reason") == "length"
     # When Claude was cut off, the *last* parsed line is the dangerous one
