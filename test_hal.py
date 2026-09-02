@@ -5977,7 +5977,7 @@ class TestIntegrationTraduci(IntegrationTestBase):
         )
         it_sub = os.path.splitext(video)[0] + ".it.srt"
 
-        with patch.object(hal, "sync_subtitle", return_value={"ok": True}), \
+        with patch.object(hal, "sync_subtitle", return_value={"ok": True, "score": 900}), \
              patch.object(hal, "DEEPL_API_KEY", ""), \
              patch.object(hal, "CLAUDE_API_KEY", "test-key"), \
              patch.object(hal, "_claude_translate_bisect",
@@ -6005,7 +6005,7 @@ class TestIntegrationTraduci(IntegrationTestBase):
         )
         it_sub = os.path.splitext(video)[0] + ".it.srt"
 
-        with patch.object(hal, "sync_subtitle", return_value={"ok": True}), \
+        with patch.object(hal, "sync_subtitle", return_value={"ok": True, "score": 900}), \
              patch.object(hal, "DEEPL_API_KEY", ""), \
              patch.object(hal, "CLAUDE_API_KEY", "test-key"):
             hal.dispatch_command("/traduci amelie", self.state, set())
@@ -6015,6 +6015,147 @@ class TestIntegrationTraduci(IntegrationTestBase):
             self._fire_callback(f"batch_keep_en:{translate_hash}")
 
         self.assertFalse(os.path.exists(it_sub))
+
+    def test_low_sync_score_warns_in_prep_summary(self):
+        """Real bug: the .en.srt sync that runs during /traduci's prep step
+        (do_translate_prep, before the user even confirms spending money on
+        translation) called sync_subtitle with min_score=0 and never looked
+        at the score — a bad sync was silently accepted with no warning
+        anywhere in the flow. The prep summary must now flag it."""
+        self._make_film(
+            "Amelie (2001)", "amelie.mkv",
+            subs=[(".en.srt", "1\n00:00:01,000 --> 00:00:02,000\nHello there\n")],
+        )
+
+        with patch.object(hal, "sync_subtitle", return_value={"ok": True, "score": 200}), \
+             patch.object(hal, "DEEPL_API_KEY", ""), \
+             patch.object(hal, "CLAUDE_API_KEY", "test-key"):
+            hal.dispatch_command("/traduci amelie", self.state, set())
+            self._drain_queue()  # runs do_translate_prep, including the sync
+
+        self.assertIn("Sync incerto", self._sent_text())
+        self.assertIn("200", self._sent_text())
+        # Still offers to translate — a low sync score doesn't block the
+        # confirm prompt, it's surfaced as information for the user to weigh.
+        self.assertIn("batch_translate", self._sent_text())
+
+    def test_sync_no_output_warns_in_prep_summary(self):
+        """ffsubsync returning False during prep (no usable output — e.g.
+        mute/corrupt audio track) must not be silently swallowed either."""
+        self._make_film(
+            "Amelie (2001)", "amelie.mkv",
+            subs=[(".en.srt", "1\n00:00:01,000 --> 00:00:02,000\nHello there\n")],
+        )
+
+        with patch.object(hal, "sync_subtitle", return_value=False), \
+             patch.object(hal, "DEEPL_API_KEY", ""), \
+             patch.object(hal, "CLAUDE_API_KEY", "test-key"):
+            hal.dispatch_command("/traduci amelie", self.state, set())
+            self._drain_queue()
+
+        self.assertIn("Sync non riuscito", self._sent_text())
+
+    def test_both_fallbacks_failing_notifies_explicitly(self):
+        """If translate_srt() returns None (every fallback it tried — DeepL,
+        then Claude/OpenRouter — failed), the user must get an explicit
+        failure message, not silence."""
+        video = self._make_film(
+            "Amelie (2001)", "amelie.mkv",
+            subs=[(".en.srt", "1\n00:00:01,000 --> 00:00:02,000\nHello there\n")],
+        )
+        it_sub = os.path.splitext(video)[0] + ".it.srt"
+
+        with patch.object(hal, "DEEPL_API_KEY", ""), \
+             patch.object(hal, "CLAUDE_API_KEY", ""):  # neither fallback configured
+            hal.dispatch_command("/traduci amelie", self.state, set())
+            self._drain_queue()
+            translate_hash = next(h for h, b in self.batches_store.items() if b.get("type") == "translate")
+            self._fire_callback(f"batch_translate:{translate_hash}")
+            self._drain_queue()
+
+        self.assertFalse(os.path.exists(it_sub))
+        self.assertIn("Traduzione fallita", self._sent_text())
+
+    def test_duplicate_translation_job_for_same_video_is_skipped(self):
+        """Real risk found reviewing the queue: nothing stopped two queued
+        translate jobs for the same video from both paying to translate it.
+        Only one worker thread exists, so this can't corrupt a write, but it
+        can pay twice — guarded at _translate_and_save, the one place the
+        spend actually happens."""
+        video = self._make_film(
+            "Amelie (2001)", "amelie.mkv",
+            subs=[(".en.srt", "1\n00:00:01,000 --> 00:00:02,000\nHello there\n")],
+        )
+        calls = []
+
+        def fake_bisect(indexed_texts, video_name, depth=0):
+            calls.append(1)
+            return {"translations": {0: "Ciao"}, "input_tokens": 5, "output_tokens": 5}
+
+        with patch.object(hal, "sync_subtitle", return_value={"ok": True, "score": 900}), \
+             patch.object(hal, "DEEPL_API_KEY", ""), \
+             patch.object(hal, "CLAUDE_API_KEY", "test-key"), \
+             patch.object(hal, "_claude_translate_bisect", side_effect=fake_bisect):
+            # Simulate a second job for the same video arriving while the
+            # first is (conceptually) still "in progress" — call the guarded
+            # function directly twice without letting the first one release
+            # the lock, by pre-marking it in progress.
+            hal._translations_in_progress.add(video)
+            try:
+                result = hal._translate_and_save(video.replace(".mkv", ".en.srt"), video, self.state, silent=True)
+            finally:
+                hal._translations_in_progress.discard(video)
+
+        self.assertFalse(result)
+        self.assertEqual(calls, [])  # never even tried to translate
+
+
+class TestOpenSubtitlesDownloadUserAgent(unittest.TestCase):
+    """Real bug found live: OSClient.download()'s second HTTP call (fetching
+    the signed download link) sent no headers at all, and the storage host
+    403'd it — verified against the real API with a real file_id. Every other
+    call in this client sends a User-Agent; this one must too."""
+
+    def test_download_link_fetch_sends_user_agent(self):
+        captured = {}
+
+        class FakeApiResponse:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self):
+                return json.dumps({"link": "https://dl.example.com/sub.srt", "remaining": 99}).encode()
+
+        class FakeLinkResponse:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return b"1\n00:00:01,000 --> 00:00:02,000\nHi\n"
+
+        def fake_urlopen(req, timeout=None):
+            if isinstance(req, str):
+                # First call in OSClient._request builds its own Request; the
+                # link fetch is the one under test.
+                captured["link_headers"] = None
+                return FakeApiResponse()
+            if "dl.example.com" in req.full_url:
+                captured["link_headers"] = dict(req.header_items())
+                return FakeLinkResponse()
+            return FakeApiResponse()
+
+        prev_key = hal.OPENSUBTITLES_API_KEY
+        hal.OPENSUBTITLES_API_KEY = "test-key"
+        client = hal.OSClient()
+        try:
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                content = client.download("12345")
+        finally:
+            hal.OPENSUBTITLES_API_KEY = prev_key
+
+        self.assertEqual(content, b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+        self.assertIn("link_headers", captured)
+        headers = captured["link_headers"] or {}
+        # urllib normalizes header keys to Capitalized-Kebab-Case.
+        self.assertIn("User-agent", headers)
+        self.assertEqual(headers["User-agent"], hal.OPENSUBTITLES_USER_AGENT)
 
 
 if __name__ == "__main__":

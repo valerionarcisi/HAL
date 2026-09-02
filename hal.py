@@ -1273,7 +1273,10 @@ class OSClient:
             log.warning(f"  OpenSubtitles download: no link in response ({resp})")
             return None
         try:
-            with urllib.request.urlopen(link, timeout=30) as r:
+            # The storage host 403s a request with no User-Agent at all —
+            # verified live: identical link, only difference is this header.
+            link_req = urllib.request.Request(link, headers={"User-Agent": OPENSUBTITLES_USER_AGENT})
+            with urllib.request.urlopen(link_req, timeout=30) as r:
                 return r.read()
         except Exception as e:
             log.warning(f"  OpenSubtitles download fetch failed: {e}")
@@ -4413,10 +4416,30 @@ def check_translation_quality(eng_srt, it_srt):
     return True, None
 
 
+_translations_in_progress = set()  # video_path currently being translated, guards against duplicate spend
+
+
 def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=False, progress_msg_id=None):
     """Translate English content to Italian and save. Returns True on success.
     Also saves the English subtitle as .en.srt alongside the Italian one.
-    skip_sync=True when the English sub is already local (timecodes match the video)."""
+    skip_sync=True when the English sub is already local (timecodes match the video).
+
+    Only one worker thread ever runs at a time (single sequential queue), so this
+    can't race at the OS level — the risk is two queued jobs for the same video
+    both paying for a translation because the second was enqueued before the
+    first finished. Guarded here, the one place the actual spend happens,
+    rather than at every command that can eventually reach this function."""
+    if video_path in _translations_in_progress:
+        log.warning(f"  Translation already in progress for {os.path.basename(video_path)}, skipping duplicate")
+        return False
+    _translations_in_progress.add(video_path)
+    try:
+        return _translate_and_save_inner(eng_content, video_path, state, silent=silent, skip_sync=skip_sync, progress_msg_id=progress_msg_id)
+    finally:
+        _translations_in_progress.discard(video_path)
+
+
+def _translate_and_save_inner(eng_content, video_path, state, silent=False, skip_sync=False, progress_msg_id=None):
     if isinstance(eng_content, bytes):
         eng_text = eng_content.decode("utf-8", errors="ignore")
     elif isinstance(eng_content, str) and os.path.isfile(eng_content):
@@ -4451,6 +4474,14 @@ def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=
 
     if not translated_srt:
         log.error(f"  Translation failed for: {os.path.basename(video_path)}")
+        # translate_srt() only returns None once every fallback it tried —
+        # DeepL, then the Claude/OpenRouter path — has failed. Silent here
+        # would mean the user just never gets a .it.srt with no explanation.
+        tg_send(
+            f"❌ Traduzione fallita per <b>{friendly_name(video_path)}</b>\n"
+            f"Sia DeepL che il fallback AI non hanno prodotto un risultato. "
+            f"Controlla i log con /log o riprova più tardi."
+        )
         return False
 
     quality_ok, quality_reason = check_translation_quality(eng_text, translated_srt)
@@ -4461,10 +4492,22 @@ def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=
     with open(sub_path, "w", encoding="utf-8") as f:
         f.write(translated_srt)
 
+    sync_result = None
     if skip_sync:
         log.info(f"  Skipping sync (local English sub, timecodes already correct)")
     else:
-        sync_subtitle(video_path, sub_path)
+        # min_score=0 here on purpose: a translated sub already cost real money,
+        # so unlike the search path (which discards a low-score download for
+        # free) we keep the file either way and just flag it — the score is
+        # read below to decide whether to warn, not to reject.
+        sync_result = sync_subtitle(video_path, sub_path)
+        if sync_result and sync_result.get("score", 0) < SYNC_MIN_SCORE:
+            log.warning(f"  Translated sub sync score low ({sync_result['score']:.0f} < {SYNC_MIN_SCORE}), keeping file anyway")
+        elif not sync_result:
+            # ffsubsync produced no output at all — e.g. no usable audio track
+            # (mute/corrupt). The file still has the original EN timecodes,
+            # so it's usable but almost certainly misaligned.
+            log.warning(f"  ffsubsync produced no output for {os.path.basename(sub_path)}, sub left with original EN timing")
 
     # Get actual cost from state (updated by translate_srt_with_claude)
     actual_state = load_state()
@@ -4481,8 +4524,12 @@ def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=
     _save_sub_and_update_state(video_path, sub_path, f"{engine} EN→IT translation", state)
     log.info(f"  ✅ Translated & saved: {os.path.basename(sub_path)}")
 
-    # Quality warning goes out regardless of `silent` — a suspect translation
-    # left unflagged during an automated backfill would never reach the user.
+    sync_score_low = sync_result and sync_result.get("score", 0) < SYNC_MIN_SCORE
+    sync_totally_failed = not skip_sync and not sync_result
+
+    # All warnings go out regardless of `silent` — a suspect translation or a
+    # bad sync left unflagged during an automated backfill would never reach
+    # the user; they'd just notice the film looks off mid-viewing.
     if not quality_ok:
         tg_send(
             f"⚠️ Sub ITA tradotto ma sospetto ({quality_reason}):\n"
@@ -4490,12 +4537,26 @@ def _translate_and_save(eng_content, video_path, state, silent=False, skip_sync=
             f"📁 {os.path.basename(sub_path)}\n"
             f"Controlla il file, la traduzione potrebbe essere incompleta o errata."
         )
+    elif sync_score_low:
+        tg_send(
+            f"⚠️ Sub ITA tradotto ma sync incerto (score {sync_result['score']:.0f} < {SYNC_MIN_SCORE}):\n"
+            f"<b>{friendly_name(video_path)}</b>\n"
+            f"📁 {os.path.basename(sub_path)}\n"
+            f"Il sync automatico non ha raggiunto una buona confidenza — verifica manualmente."
+        )
+    elif sync_totally_failed:
+        tg_send(
+            f"⚠️ Sub ITA tradotto ma il sync automatico non ha funzionato (nessun output):\n"
+            f"<b>{friendly_name(video_path)}</b>\n"
+            f"📁 {os.path.basename(sub_path)}\n"
+            f"Timecode rimasti quelli originali ENG — probabile audio non utilizzabile, verifica manualmente."
+        )
     elif not silent:
         tg_send(
             f"🤖 Sub ITA tradotto da ENG ({engine}):\n"
             f"<b>{friendly_name(video_path)}</b>\n"
             f"📁 {os.path.basename(sub_path)}\n"
-            f"💰 Totale speso: ${total_spent:.4f}"
+            f"💰 Totale speso: €{usd_to_eur(total_spent):.4f}"
             + (f" | DeepL: {deepl_chars:,} char" if deepl_chars else "")
         )
     return True
@@ -8044,6 +8105,8 @@ def do_translate_prep(query, state, progress_msg_id=None):
 
     total = len(eligible)
     synced = 0
+    uncertain_sync = []  # (video_path, score) — synced but below SYNC_MIN_SCORE
+    no_sync_output = []  # video_path — ffsubsync produced nothing (e.g. bad audio)
     for i, (video_path, en_srt) in enumerate(eligible):
         if progress_msg_id:
             bar = _progress_bar(i, total)
@@ -8053,8 +8116,16 @@ def do_translate_prep(query, state, progress_msg_id=None):
                 f"<i>{friendly_name(video_path)}</i>",
             )
         try:
-            sync_subtitle(video_path, en_srt)
+            # min_score=0: this is the prep step, before the user has even
+            # confirmed spending money on translation — a bad score here just
+            # gets surfaced in the confirm prompt below, never silently
+            # discarded (a translated sub isn't free to redo like a download).
+            result = sync_subtitle(video_path, en_srt)
             synced += 1
+            if result and result.get("score", 0) < SYNC_MIN_SCORE:
+                uncertain_sync.append((video_path, result["score"]))
+            elif not result:
+                no_sync_output.append(video_path)
         except Exception as e:
             log.warning(f"  translate_prep sync failed for {video_path}: {e}")
 
@@ -8063,6 +8134,12 @@ def do_translate_prep(query, state, progress_msg_id=None):
 
     summary = f"📊 <b>Translate prep '{query}'</b>\n\n"
     summary += f"🔄 Sincronizzati: {synced}/{total}\n"
+    if uncertain_sync:
+        names = ", ".join(f"{friendly_name(vp)} (score {sc:.0f})" for vp, sc in uncertain_sync[:5])
+        summary += f"⚠️ Sync incerto (< {SYNC_MIN_SCORE}): {names}\n"
+    if no_sync_output:
+        names = ", ".join(friendly_name(vp) for vp in no_sync_output[:5])
+        summary += f"⚠️ Sync non riuscito (audio non utilizzabile?): {names}\n"
     if already_it:
         summary += f"🇮🇹 Già con sub ITA (saltati): {len(already_it)}\n"
     if no_en:
