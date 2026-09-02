@@ -4502,7 +4502,7 @@ def _translate_and_save_inner(eng_content, video_path, state, silent=False, skip
         # read below to decide whether to warn, not to reject.
         sync_result = sync_subtitle(video_path, sub_path)
         if sync_result and sync_result.get("score", 0) < SYNC_MIN_SCORE:
-            log.warning(f"  Translated sub sync score low ({sync_result['score']:.0f} < {SYNC_MIN_SCORE}), keeping file anyway")
+            log.warning(f"  Translated sub sync score low ({sync_result.get('score', 0):.0f} < {SYNC_MIN_SCORE}), keeping file anyway")
         elif not sync_result:
             # ffsubsync produced no output at all — e.g. no usable audio track
             # (mute/corrupt). The file still has the original EN timecodes,
@@ -4539,7 +4539,7 @@ def _translate_and_save_inner(eng_content, video_path, state, silent=False, skip
         )
     elif sync_score_low:
         tg_send(
-            f"⚠️ Sub ITA tradotto ma sync incerto (score {sync_result['score']:.0f} < {SYNC_MIN_SCORE}):\n"
+            f"⚠️ Sub ITA tradotto ma sync incerto (score {sync_result.get('score', 0):.0f} < {SYNC_MIN_SCORE}):\n"
             f"<b>{friendly_name(video_path)}</b>\n"
             f"📁 {os.path.basename(sub_path)}\n"
             f"Il sync automatico non ha raggiunto una buona confidenza — verifica manualmente."
@@ -8123,7 +8123,7 @@ def do_translate_prep(query, state, progress_msg_id=None):
             result = sync_subtitle(video_path, en_srt)
             synced += 1
             if result and result.get("score", 0) < SYNC_MIN_SCORE:
-                uncertain_sync.append((video_path, result["score"]))
+                uncertain_sync.append((video_path, result.get("score", 0)))
             elif not result:
                 no_sync_output.append(video_path)
         except Exception as e:
