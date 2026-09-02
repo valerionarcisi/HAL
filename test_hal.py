@@ -1345,7 +1345,7 @@ class TestSyncValidationCascade(unittest.TestCase):
         video = os.path.join(tmp, "Film.2024.mkv")
         open(video, "w").close()
 
-        def fake_validate(vp, content, dest):
+        def fake_validate(vp, content, dest, **kwargs):
             if dest.endswith(".it.srt"):
                 if ita_sync_ok:
                     with open(dest, "wb") as f:
@@ -1402,7 +1402,7 @@ class TestSyncValidationCascade(unittest.TestCase):
 
         saved_paths = []
 
-        def fake_validate(vp, content, dest):
+        def fake_validate(vp, content, dest, **kwargs):
             saved_paths.append(dest)
             with open(dest, "wb") as f:
                 f.write(content if isinstance(content, bytes) else content.encode())
@@ -1471,7 +1471,7 @@ class TestSyncValidationCascade(unittest.TestCase):
         video = os.path.join(tmp, "Film.2024.mkv")
         open(video, "w").close()
 
-        def fake_validate(vp, content, dest):
+        def fake_validate(vp, content, dest, **kwargs):
             if dest.endswith(".it.srt"):
                 with open(dest, "wb") as f:
                     f.write(content if isinstance(content, bytes) else content.encode())
@@ -1499,6 +1499,66 @@ class TestSyncValidationCascade(unittest.TestCase):
                 result, source = hal.do_download(video, state, silent=True, translate=False)
             self.assertTrue(result)
             self.assertEqual(source, "Subdl.com")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_ita_sync_serializes_speech_for_eng_reuse(self):
+        """Verified live: ffsubsync's audio extraction + VAD is the real cost
+        of a sync (~5min on a feature film) and is identical whether it's
+        for the ITA or the ENG sub of the same video. do_download must pass
+        save_speech=True to the ITA sync and, if the resulting .npz exists,
+        speech_ref=<that .npz> to the ENG sync — turning the second sync
+        into a ~10s reuse instead of a second full extraction."""
+        from unittest.mock import patch, MagicMock
+        tmp = tempfile.mkdtemp()
+        video = os.path.join(tmp, "Film.2024.mkv")
+        open(video, "w").close()
+        npz_path = os.path.splitext(video)[0] + ".npz"
+
+        calls = []
+
+        def fake_validate(vp, content, dest, **kwargs):
+            calls.append((dest, kwargs))
+            if dest.endswith(".it.srt"):
+                with open(dest, "wb") as f:
+                    f.write(content if isinstance(content, bytes) else content.encode())
+                # Simulate ffsubsync actually writing the VAD cache.
+                with open(npz_path, "wb") as f:
+                    f.write(b"fake-npz")
+                return {"ok": True, "score": 900.0}
+            elif dest.endswith(".en.srt"):
+                with open(dest, "wb") as f:
+                    f.write(content if isinstance(content, bytes) else content.encode())
+                return {"ok": True, "score": 900.0}
+            return {"ok": False, "score": 0.0}
+
+        subdl_mock = MagicMock()
+        subdl_mock.search_and_download = MagicMock(
+            side_effect=lambda vp, language="it", trace=None:
+                b"1\n00:00:01,000 --> 00:00:02,000\nHi\n"
+        )
+        os_client = MagicMock()
+        os_client.login.return_value = False
+        os_client.available = False
+
+        state = {"asked": {}, "downloaded": {}}
+        try:
+            with patch.object(hal, "SubdlClient", return_value=subdl_mock), \
+                 patch.object(hal, "OSClient", return_value=os_client), \
+                 patch.object(hal, "validate_sync", side_effect=fake_validate), \
+                 patch.object(hal, "find_existing_srt", return_value=None), \
+                 patch.object(hal, "_save_sub_and_update_state"), \
+                 patch.object(hal, "save_state"), \
+                 patch.object(hal, "tg_send"):
+                hal.do_download(video, state, silent=True, translate=False)
+
+            ita_call = next(c for c in calls if c[0].endswith(".it.srt"))
+            eng_call = next(c for c in calls if c[0].endswith(".en.srt"))
+            self.assertTrue(ita_call[1].get("save_speech"))
+            self.assertEqual(eng_call[1].get("speech_ref"), npz_path)
+            # The .npz is a working file, not a deliverable — do_download
+            # must clean it up once both syncs are done.
+            self.assertFalse(os.path.exists(npz_path))
         finally:
             shutil.rmtree(tmp)
 

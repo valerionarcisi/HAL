@@ -3409,15 +3409,28 @@ def format_release_button(release, target_code=None):
 # SUBTITLE SYNC (ffsubsync)
 # =============================================================================
 
-def sync_subtitle(video_path, srt_path, min_score=0):
+def sync_subtitle(video_path, srt_path, min_score=0, speech_ref=None, save_speech=False):
     """Sync subtitle to video audio using ffsubsync. Overwrites srt_path in place.
     Returns dict with 'ok', 'score', 'offset', 'fps_scale' or False on failure.
-    If min_score > 0, rejects syncs with score below threshold."""
+    If min_score > 0, rejects syncs with score below threshold.
+
+    speech_ref: path to a .npz produced by an earlier save_speech=True run on
+    the SAME video — ffsubsync then reuses that pre-extracted VAD speech
+    instead of re-running audio extraction + VAD on the full video, which is
+    the actual cost of a sync (~4-5 min on a feature-length film) and is
+    identical across multiple subs synced to the same video (e.g. ITA then
+    ENG in do_download). Verified live: 12s vs ~5min, same sync score.
+
+    save_speech: pass --serialize-speech so ffsubsync writes that .npz next
+    to `video_path` (ffsubsync's own naming: same basename, .npz extension) —
+    the caller is responsible for locating and cleaning it up."""
     import subprocess, re as _re, tempfile, shutil
     try:
         tmp_out = tempfile.mktemp(suffix=".srt", prefix="ffsync_")
         tmp_log = tempfile.mktemp(suffix=".log", prefix="ffsync_")
-        cmd = f'ffsubsync "{video_path}" -i "{srt_path}" -o "{tmp_out}" > "{tmp_log}" 2>&1'
+        reference = speech_ref if speech_ref else video_path
+        extra_flag = " --serialize-speech" if save_speech else ""
+        cmd = f'ffsubsync "{reference}" -i "{srt_path}" -o "{tmp_out}"{extra_flag} > "{tmp_log}" 2>&1'
         exit_code = os.system(cmd)
         log_content = ""
         if os.path.exists(tmp_log):
@@ -3453,9 +3466,13 @@ def sync_subtitle(video_path, srt_path, min_score=0):
     return False
 
 
-def validate_sync(video_path, content_bytes, dest_path):
+def validate_sync(video_path, content_bytes, dest_path, speech_ref=None, save_speech=False):
     """Write subtitle content to dest_path, sync it to the video audio,
     and validate the sync score against SYNC_MIN_SCORE.
+
+    speech_ref / save_speech: see sync_subtitle() — lets a second sub synced
+    to the same video (e.g. ENG after ITA in do_download) skip re-extracting
+    audio from the video.
 
     Returns:
       {"ok": True, "score": float}  — sync passed, dest_path contains synced sub
@@ -3470,7 +3487,8 @@ def validate_sync(video_path, content_bytes, dest_path):
         log.error(f"  validate_sync: failed to write {dest_path}: {e}")
         return False
 
-    result = sync_subtitle(video_path, dest_path, min_score=SYNC_MIN_SCORE)
+    result = sync_subtitle(video_path, dest_path, min_score=SYNC_MIN_SCORE,
+                            speech_ref=speech_ref, save_speech=save_speech)
 
     if result and result.get("ok"):
         return result
@@ -4637,12 +4655,24 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
     sub_path = os.path.splitext(video_path)[0] + ".it.srt"
     en_srt_path = os.path.splitext(video_path)[0] + ".en.srt"
 
-    ita_saved = _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trace)
+    # ITA sync (if it runs at all) serializes its VAD speech analysis to a
+    # .npz so the ENG sync right after — same video, same audio track — can
+    # reuse it instead of re-extracting: ~5min -> ~10s, verified live with
+    # an identical sync score either way.
+    npz_path = os.path.splitext(video_path)[0] + ".npz"
+    ita_saved = _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trace, save_speech=True)
 
     # =================================================================
     # STEP 2: Search & save ENG (always — useful as backup or for translation)
     # =================================================================
-    eng_saved = _try_save_eng(subdl, client, os_logged_in, video_path, en_srt_path, trace)
+    speech_ref = npz_path if os.path.exists(npz_path) else None
+    eng_saved = _try_save_eng(subdl, client, os_logged_in, video_path, en_srt_path, trace, speech_ref=speech_ref)
+
+    if os.path.exists(npz_path):
+        try:
+            os.remove(npz_path)
+        except Exception as e:
+            log.warning(f"  Failed to remove VAD cache {npz_path}: {e}")
 
     if os_logged_in:
         if trace is not None and client.downloads_remaining is not None:
@@ -4683,15 +4713,19 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
     return "en_only", None
 
 
-def _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trace):
+def _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trace, save_speech=False):
     """Search ITA on Subdl then OpenSubtitles, validate sync, save .it.srt.
     Returns the short source label ("Subdl.com" / "OpenSubtitles.com") if a
     synced ITA sub was saved, None otherwise — shown to the user in the
-    Telegram success message so they know where a sub came from."""
+    Telegram success message so they know where a sub came from.
+
+    save_speech: passed through to validate_sync so the .npz VAD cache gets
+    written on whichever attempt actually runs ffsubsync — needed so a
+    subsequent ENG sync on the same video (see do_download) can reuse it."""
     # --- Subdl ITA ---
     ita_content = subdl.search_and_download(video_path, language="it", trace=trace)
     if ita_content:
-        sync_result = validate_sync(video_path, ita_content, sub_path)
+        sync_result = validate_sync(video_path, ita_content, sub_path, save_speech=save_speech)
         if sync_result and sync_result.get("ok"):
             _save_sub_and_update_state(video_path, sub_path, "Subdl.com", state)
             log.info(f"  ✅ Saved ITA (Subdl, sync score {sync_result['score']:.0f}): {os.path.basename(sub_path)}")
@@ -4713,7 +4747,7 @@ def _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trac
                               "query": "", "results": len(results),
                               "rejected": "tutti rifiutati (placeholder/invalid)"})
             if content:
-                sync_result = validate_sync(video_path, content, sub_path)
+                sync_result = validate_sync(video_path, content, sub_path, save_speech=save_speech)
                 if sync_result and sync_result.get("ok"):
                     _save_sub_and_update_state(video_path, sub_path,
                                                f"OpenSubtitles: {best.get('SubFileName', '')}", state)
@@ -4730,9 +4764,12 @@ def _try_save_ita(subdl, client, os_logged_in, video_path, sub_path, state, trac
     return None
 
 
-def _try_save_eng(subdl, client, os_logged_in, video_path, en_srt_path, trace):
+def _try_save_eng(subdl, client, os_logged_in, video_path, en_srt_path, trace, speech_ref=None):
     """Search ENG on Subdl then OpenSubtitles, validate sync, save .en.srt.
-    Returns True if a synced ENG sub was saved."""
+    Returns True if a synced ENG sub was saved.
+
+    speech_ref: .npz from an earlier save_speech=True sync on this SAME
+    video (see do_download) — skips re-extracting audio, ~5min -> ~10s."""
     eng_content = subdl.search_and_download(video_path, language="en", trace=trace)
     if not eng_content and os_logged_in:
         file_hash, file_size = compute_hash(video_path)
@@ -4740,7 +4777,7 @@ def _try_save_eng(subdl, client, os_logged_in, video_path, en_srt_path, trace):
     if not eng_content:
         return False
 
-    sync_result = validate_sync(video_path, eng_content, en_srt_path)
+    sync_result = validate_sync(video_path, eng_content, en_srt_path, speech_ref=speech_ref)
     if not sync_result or not sync_result.get("ok"):
         score_val = sync_result.get("score", "?") if isinstance(sync_result, dict) else "N/A"
         log.warning(f"  ENG sync score too low ({score_val}), discarding")
