@@ -6828,10 +6828,12 @@ def fetch_analytics_report(url, token, timeout=15, period=ANALYTICS_REPORT_PERIO
         retryable = False
         try:
             req = urllib.request.Request(full_url, headers={
-                "Authorization": f"Bearer {token}",
                 "Accept": "text/plain",
                 "User-Agent": "HAL/1.0",
             })
+            # unredirected: urllib copies normal headers to the redirect target, which
+            # would send the bearer token to whatever host a redirect points at
+            req.add_unredirected_header("Authorization", f"Bearer {token}")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace").strip()
             if body:

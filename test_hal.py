@@ -3906,6 +3906,14 @@ class TestFetchAnalyticsReport(unittest.TestCase):
         self.assertIn("a=1", url)
         self.assertIn("period=week", url)
 
+    def test_bearer_is_not_forwarded_on_redirects(self):
+        with patch.object(hal.urllib.request, "urlopen", return_value=_FakeResp(b"x")) as m:
+            hal.fetch_analytics_report("https://example.test/r", "secret-token")
+        req = m.call_args[0][0]
+        self.assertEqual(req.get_header("Authorization"), "Bearer secret-token")
+        self.assertNotIn("Authorization", req.headers)
+        self.assertIn("Authorization", req.unredirected_hdrs)
+
 
 class TestSplitTelegramText(unittest.TestCase):
     def test_short_unchanged(self):
