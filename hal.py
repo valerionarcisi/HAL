@@ -90,7 +90,6 @@ POLISH_TRANSLATION = os.environ.get("POLISH_TRANSLATION", "true").lower() in ("1
 # Radarr integration (/scarica command — request new films from Telegram).
 RADARR_URL = os.environ.get("RADARR_URL", "").rstrip("/")
 RADARR_API_KEY = os.environ.get("RADARR_API_KEY", "")
-BLOG_ANALYTICS_TOKEN = os.environ.get("BLOG_ANALYTICS_TOKEN", "")
 RADARR_ROOT_FOLDER = os.environ.get("RADARR_ROOT_FOLDER", "")
 RADARR_QUALITY_PROFILE = os.environ.get("RADARR_QUALITY_PROFILE", "")
 RADARR_PREFERRED_LANGUAGES = [
