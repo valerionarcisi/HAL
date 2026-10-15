@@ -30,6 +30,8 @@ import urllib.parse
 import zipfile
 import io
 import html
+import socket
+from datetime import timezone, tzinfo
 from xmlrpc.client import ServerProxy
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -106,6 +108,31 @@ CERCA_DOWNLOAD_DIR = os.environ.get("CERCA_DOWNLOAD_DIR", "/media/films")
 # listed but tagged "bassa qualità" so the user knows what they are picking.
 CERCA_MIN_RESOLUTION = int(os.environ.get("CERCA_MIN_RESOLUTION", "720"))
 CERCA_FALLBACK_RESOLUTION = int(os.environ.get("CERCA_FALLBACK_RESOLUTION", "480"))
+
+# Blog analytics report (optional: feature is disabled when the token is unset)
+BLOG_ANALYTICS_TOKEN = os.environ.get("BLOG_ANALYTICS_TOKEN", "")
+BLOG_ANALYTICS_URL = os.environ.get(
+    "BLOG_ANALYTICS_URL", "https://valerionarcisi.me/api/analytics-report"
+).strip()
+ANALYTICS_REPORT_ENABLED = os.environ.get("ANALYTICS_REPORT_ENABLED", "1").strip() != "0"
+ANALYTICS_REPORT_TZ = os.environ.get("ANALYTICS_REPORT_TZ", "Europe/Rome").strip()
+
+
+def _parse_report_hour(raw, default=7):
+    try:
+        hour = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return hour if 0 <= hour <= 23 else default
+
+
+ANALYTICS_REPORT_HOUR = _parse_report_hour(os.environ.get("ANALYTICS_REPORT_HOUR", "7"))
+ANALYTICS_REPORT_PERIOD = "week"  # only period the blog endpoint supports today
+ANALYTICS_RETRY_INTERVAL_SECONDS = 30 * 60
+ANALYTICS_MAX_ATTEMPTS_PER_WEEK = 4
+ANALYTICS_CATCHUP_LAST_WEEKDAY = 2  # Monday=0 ... Wednesday=2: last day to send a late report
+ANALYTICS_RETRY_BACKOFF_SECONDS = 2
+TELEGRAM_MAX_MESSAGE_CHARS = 4096
 
 # Media paths (inside the container, mapped via volumes)
 SERIES_PATH = "/media/series"
@@ -309,12 +336,13 @@ def _was_callback_answered(callback_id):
         return callback_id in _ANSWERED_CALLBACK_SET
 
 
-def tg_send(text, reply_markup=None):
+def tg_send(text, reply_markup=None, parse_mode="HTML"):
     data = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML",
     }
+    if parse_mode:
+        data["parse_mode"] = parse_mode
     if reply_markup:
         data["reply_markup"] = reply_markup
     return tg_request("sendMessage", data)
@@ -333,13 +361,14 @@ def tg_answer_callback(callback_id, text=""):
     })
 
 
-def tg_edit_message(message_id, text, reply_markup=None):
+def tg_edit_message(message_id, text, reply_markup=None, parse_mode="HTML"):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "message_id": message_id,
         "text": text,
-        "parse_mode": "HTML",
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return tg_request("editMessageText", payload)
@@ -6722,6 +6751,250 @@ def _cmd_falliti(arg, state, excludes):
     tg_send("\n".join(lines), reply_markup=keyboard)
 
 
+# =============================================================================
+# BLOG ANALYTICS REPORT
+# =============================================================================
+
+class _EuropeRomeFallback(tzinfo):
+    """Europe/Rome without tzdata: CET (+1) / CEST (+2), EU rule (DST from the
+    last Sunday of March 01:00 UTC to the last Sunday of October 01:00 UTC)."""
+
+    def _is_dst_utc(self, utc_naive):
+        def last_sunday(year, month):
+            d = datetime(year, month, 31, 1)
+            return d - timedelta(days=(d.weekday() + 1) % 7)
+        y = utc_naive.year
+        return last_sunday(y, 3) <= utc_naive < last_sunday(y, 10)
+
+    def utcoffset(self, dt):
+        wall = dt.replace(tzinfo=None)
+        dst_valid = self._is_dst_utc(wall - timedelta(hours=2))
+        std_valid = not self._is_dst_utc(wall - timedelta(hours=1))
+        if dst_valid and std_valid:  # repeated hour at fall-back
+            is_dst = dt.fold == 0
+        else:
+            is_dst = dst_valid
+        return timedelta(hours=2) if is_dst else timedelta(hours=1)
+
+    def dst(self, dt):
+        return self.utcoffset(dt) - timedelta(hours=1)
+
+    def tzname(self, dt):
+        return "CEST" if self.dst(dt) else "CET"
+
+    def fromutc(self, dt):
+        naive = dt.replace(tzinfo=None)
+        if self._is_dst_utc(naive):
+            return (naive + timedelta(hours=2)).replace(tzinfo=self)
+        fold = 1 if self._is_dst_utc(naive - timedelta(hours=1)) else 0
+        return (naive + timedelta(hours=1)).replace(tzinfo=self, fold=fold)
+
+
+def get_report_tz(name=None):
+    """Resolve the report timezone; degrade gracefully when tzdata is missing."""
+    name = name or ANALYTICS_REPORT_TZ
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:
+        if name == "Europe/Rome":
+            log.warning("analytics: tzdata missing, using built-in Europe/Rome rules")
+            return _EuropeRomeFallback()
+        log.warning(f"analytics: unknown timezone {name!r}, falling back to UTC")
+        return timezone.utc
+
+
+def analytics_enabled():
+    """Command is available iff the token is set."""
+    return bool(BLOG_ANALYTICS_TOKEN)
+
+
+def analytics_scheduler_enabled():
+    return analytics_enabled() and ANALYTICS_REPORT_ENABLED
+
+
+def fetch_analytics_report(url, token, timeout=15, period=ANALYTICS_REPORT_PERIOD):
+    """GET the finished report. Returns (True, text) or (False, error_kind) with
+    error_kind in unauthorized | not_configured | unavailable | timeout | network.
+    One retry on timeout / 5xx / network error; never on 401/503. Neither the
+    token nor the response body is ever logged."""
+    parts = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qsl(parts.query) + [("period", period)]
+    full_url = urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(query), parts.fragment)
+    )
+    kind = "unavailable"
+    for attempt in (1, 2):
+        retryable = False
+        try:
+            req = urllib.request.Request(full_url, headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "text/plain",
+                "User-Agent": "HAL/1.0",
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace").strip()
+            if body:
+                log.info(f"analytics: fetch ok (attempt {attempt}, {len(body)} chars)")
+                return True, body
+            kind = "unavailable"
+        except urllib.error.HTTPError as e:
+            code = getattr(e, "code", 0)
+            if code == 401:
+                log.warning("analytics: fetch failed status=401")
+                return False, "unauthorized"
+            if code == 503:
+                log.warning("analytics: fetch failed status=503")
+                return False, "not_configured"
+            kind = "unavailable"
+            retryable = code >= 500
+            log.warning(f"analytics: fetch failed status={code} attempt={attempt}")
+        except (socket.timeout, TimeoutError):
+            kind, retryable = "timeout", True
+            log.warning(f"analytics: fetch timeout attempt={attempt}")
+        except urllib.error.URLError as e:
+            if isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
+                kind = "timeout"
+            else:
+                kind = "network"
+            retryable = True
+            log.warning(f"analytics: fetch {kind} error attempt={attempt}")
+        except Exception as e:
+            kind, retryable = "network", True
+            log.warning(f"analytics: fetch unexpected error {type(e).__name__} attempt={attempt}")
+        if attempt == 1 and retryable:
+            time.sleep(ANALYTICS_RETRY_BACKOFF_SECONDS)
+            continue
+        break
+    return False, kind
+
+
+def split_telegram_text(text, limit=TELEGRAM_MAX_MESSAGE_CHARS):
+    """Split at the last newline before `limit` (hard cut if there is none)."""
+    chunks = []
+    rest = text
+    while len(rest) > limit:
+        cut = rest.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(rest[:cut].rstrip("\n"))
+        rest = rest[cut:].lstrip("\n")
+    if rest:
+        chunks.append(rest)
+    return chunks
+
+
+ANALYTICS_ERROR_MESSAGES = {
+    "unauthorized": "🔑 Il blog ha rifiutato il token delle statistiche (BLOG_ANALYTICS_TOKEN errato).",
+    "not_configured": "⚙️ L'endpoint statistiche del blog non è ancora configurato.",
+    "timeout": "⏱️ Il blog non ha risposto in tempo. Riprova tra poco.",
+    "network": "🌐 Blog non raggiungibile. Riprova tra poco.",
+    "unavailable": "⚠️ Il blog non riesce a fornire le statistiche al momento. Riprova più tardi.",
+}
+
+
+def _analytics_error_text(kind):
+    return ANALYTICS_ERROR_MESSAGES.get(kind, ANALYTICS_ERROR_MESSAGES["unavailable"])
+
+
+def _deliver_report_text(text, message_id=None):
+    """Send a plain-text report (no parse_mode); first chunk may replace a placeholder."""
+    chunks = split_telegram_text(text)
+    for i, chunk in enumerate(chunks):
+        if i == 0 and message_id:
+            tg_edit_message(message_id, chunk, parse_mode=None)
+        else:
+            tg_send(chunk, parse_mode=None)
+
+
+def _cmd_statistiche(arg, state, excludes):
+    if not analytics_enabled():
+        tg_send("⚙️ Statistiche del blog non configurate (manca BLOG_ANALYTICS_TOKEN).")
+        return
+    result = tg_send("⏳ Recupero le statistiche…")
+    msg_id = result["result"]["message_id"] if result and result.get("ok") else None
+    ok, payload = fetch_analytics_report(BLOG_ANALYTICS_URL, BLOG_ANALYTICS_TOKEN)
+    if ok:
+        _deliver_report_text(payload, msg_id)
+    elif msg_id:
+        tg_edit_message(msg_id, _analytics_error_text(payload))
+    else:
+        tg_send(_analytics_error_text(payload))
+
+
+def iso_week_key(dt):
+    iso = dt.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def should_send_analytics_report(now_local, last_week, attempts_state, hour=None):
+    """Pure scheduler decision. `now_local` is an aware datetime in the report
+    TZ; `last_week` the ISO week of the last successful send ("2026-W42");
+    `attempts_state` is {"week", "count", "last_attempt_ts"} (epoch seconds)."""
+    hour = ANALYTICS_REPORT_HOUR if hour is None else hour
+    week = iso_week_key(now_local)
+    if last_week == week:
+        return False
+    weekday = now_local.weekday()
+    if weekday > ANALYTICS_CATCHUP_LAST_WEEKDAY:
+        return False
+    if weekday == 0 and now_local.hour < hour:
+        return False
+    attempts = attempts_state or {}
+    if attempts.get("week") == week:
+        if attempts.get("count", 0) >= ANALYTICS_MAX_ATTEMPTS_PER_WEEK:
+            return False
+        last_ts = attempts.get("last_attempt_ts")
+        # epoch comparison keeps the spacing DST-safe
+        if last_ts and now_local.timestamp() - last_ts < ANALYTICS_RETRY_INTERVAL_SECONDS:
+            return False
+    return True
+
+
+def maybe_send_analytics_report(state, now_local=None):
+    """Called from the main loop; never raises. Main thread owns `state`."""
+    try:
+        if not analytics_scheduler_enabled():
+            return
+        now_local = now_local or datetime.now(get_report_tz())
+        week = iso_week_key(now_local)
+        last_week = state.get("analytics_report_last_week")
+        if last_week != week:
+            # a queue-worker save may have written a newer value than our copy
+            persisted = load_state().get("analytics_report_last_week")
+            if persisted == week:
+                state["analytics_report_last_week"] = persisted
+                return
+        attempts = state.get("analytics_report_attempts") or {}
+        if not should_send_analytics_report(now_local, last_week, attempts):
+            return
+        if attempts.get("week") != week:
+            attempts = {"week": week, "count": 0, "last_attempt_ts": None, "notice_sent": False}
+        # record the attempt before fetching so a crash cannot cause a retry storm
+        attempts["count"] = attempts.get("count", 0) + 1
+        attempts["last_attempt_ts"] = now_local.timestamp()
+        state["analytics_report_attempts"] = attempts
+        save_state(state)
+
+        ok, payload = fetch_analytics_report(BLOG_ANALYTICS_URL, BLOG_ANALYTICS_TOKEN)
+        if ok:
+            _deliver_report_text(payload)
+            state["analytics_report_last_week"] = week
+            state.pop("analytics_report_attempts", None)
+            save_state(state)
+            log.info(f"analytics: weekly report sent week={week}")
+            return
+        log.warning(f"analytics: weekly report failed week={week} kind={payload} "
+                    f"attempt={attempts['count']}")
+        if attempts["count"] >= ANALYTICS_MAX_ATTEMPTS_PER_WEEK and not attempts.get("notice_sent"):
+            attempts["notice_sent"] = True
+            tg_send("⚠️ Non sono riuscito a recuperare il report settimanale delle statistiche "
+                    "del blog. Riproverò la prossima settimana, oppure usa /statistiche.")
+        save_state(state)
+    except Exception as e:
+        log.error(f"analytics: scheduler error {type(e).__name__}: {e}", exc_info=True)
+
+
 # Registry — single source of truth for /aiuto and the dispatcher.
 # `canonical` is the form shown in /aiuto. `aliases` are interchangeable.
 # `group` controls the section in /aiuto.
@@ -6773,6 +7046,10 @@ COMMANDS = [
     {"canonical": "/costi", "aliases": ["/costs", "/cost"], "handler": _cmd_costi,
      "group": "Stato & manutenzione", "args": "",
      "desc": "Costi DeepL + Claude polish + Claude fallback"},
+    {"canonical": "/statistiche", "aliases": ["/stats", "/analytics", "/report"],
+     "handler": _cmd_statistiche,
+     "group": "Stato & manutenzione", "args": "",
+     "desc": "Report statistiche del blog (ogni lunedì in automatico)"},
     {"canonical": "/falliti", "aliases": ["/failed"], "handler": _cmd_falliti,
      "group": "Stato & manutenzione", "args": "",
      "desc": "Lista video falliti, con pulsante per riprovare tutti"},
@@ -8592,6 +8869,8 @@ def main():
     log.info(f"Series path: {SERIES_PATH}")
     log.info(f"Films path: {FILMS_PATH}")
     log.info(f"Scan interval: {SCAN_INTERVAL}s")
+    log.info(f"Analytics report: command={'on' if analytics_enabled() else 'off'} "
+             f"scheduler={'on' if analytics_scheduler_enabled() else 'off'}")
 
     state = load_state()
     excludes = load_excludes()
@@ -8607,6 +8886,7 @@ def main():
         try:
             # Process any pending Telegram callbacks/commands
             process_callbacks(state, excludes)
+            maybe_send_analytics_report(state)
 
             # Scan for missing subs
             excludes = load_excludes()  # Reload in case user edited file
@@ -8620,6 +8900,7 @@ def main():
             for _ in range(SCAN_INTERVAL // 5):
                 time.sleep(5)
                 process_callbacks(state, excludes)
+                maybe_send_analytics_report(state)
 
         except KeyboardInterrupt:
             log.info("Shutting down...")

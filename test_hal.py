@@ -3822,6 +3822,333 @@ class TestRenderReleasePageCollapse(unittest.TestCase):
         self.assertTrue(reloaded["pending_radarr"]["film:abc"]["show_refuted"])
 
 
+class _FakeResp:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("http://x", code, "err", {}, None)
+
+
+class TestFetchAnalyticsReport(unittest.TestCase):
+    TOKEN = "SECRET-TOKEN-123"
+
+    def _run(self, side_effect):
+        with patch.object(hal.urllib.request, "urlopen", side_effect=side_effect) as m, \
+             patch.object(hal.time, "sleep") as sl, \
+             self.assertLogs("hal", level="DEBUG") as logs:
+            hal.log.info("sentinel")  # assertLogs needs at least one record
+            result = hal.fetch_analytics_report("https://example.test/r", self.TOKEN)
+        for line in logs.output:
+            self.assertNotIn(self.TOKEN, line)
+            self.assertNotIn("BODYTEXT", line)
+        return result, m, sl
+
+    def test_ok(self):
+        (ok, text), m, _ = self._run([_FakeResp("Report BODYTEXT \u00e8".encode("utf-8"))])
+        self.assertTrue(ok)
+        self.assertIn("BODYTEXT", text)
+        req = m.call_args[0][0]
+        self.assertEqual(req.get_header("Authorization"), f"Bearer {self.TOKEN}")
+        self.assertIn("period=week", req.full_url)
+
+    def test_unauthorized_no_retry(self):
+        (ok, kind), m, _ = self._run([_http_error(401)])
+        self.assertEqual((ok, kind), (False, "unauthorized"))
+        self.assertEqual(m.call_count, 1)
+
+    def test_not_configured_no_retry(self):
+        (ok, kind), m, _ = self._run([_http_error(503)])
+        self.assertEqual((ok, kind), (False, "not_configured"))
+        self.assertEqual(m.call_count, 1)
+
+    def test_timeout_then_success(self):
+        (ok, text), m, sl = self._run([TimeoutError("t"), _FakeResp(b"BODYTEXT")])
+        self.assertTrue(ok)
+        self.assertEqual(m.call_count, 2)
+        sl.assert_called_once()
+
+    def test_timeout_twice(self):
+        (ok, kind), m, _ = self._run([TimeoutError("t"), TimeoutError("t")])
+        self.assertEqual((ok, kind), (False, "timeout"))
+        self.assertEqual(m.call_count, 2)
+
+    def test_network_error(self):
+        err = urllib.error.URLError(ConnectionRefusedError("no"))
+        (ok, kind), m, _ = self._run([err, err])
+        self.assertEqual((ok, kind), (False, "network"))
+        self.assertEqual(m.call_count, 2)
+
+    def test_5xx_retried_then_unavailable(self):
+        (ok, kind), m, _ = self._run([_http_error(500), _http_error(502)])
+        self.assertEqual((ok, kind), (False, "unavailable"))
+        self.assertEqual(m.call_count, 2)
+
+    def test_404_not_retried(self):
+        (ok, kind), m, _ = self._run([_http_error(404)])
+        self.assertEqual((ok, kind), (False, "unavailable"))
+        self.assertEqual(m.call_count, 1)
+
+    def test_existing_query_preserved(self):
+        with patch.object(hal.urllib.request, "urlopen", return_value=_FakeResp(b"x")) as m:
+            hal.fetch_analytics_report("https://example.test/r?a=1", "t")
+        url = m.call_args[0][0].full_url
+        self.assertIn("a=1", url)
+        self.assertIn("period=week", url)
+
+
+class TestSplitTelegramText(unittest.TestCase):
+    def test_short_unchanged(self):
+        self.assertEqual(hal.split_telegram_text("abc"), ["abc"])
+
+    def test_splits_at_newline(self):
+        text = "\n".join(["x" * 99] * 100)
+        chunks = hal.split_telegram_text(text, limit=1000)
+        self.assertGreater(len(chunks), 1)
+        for c in chunks:
+            self.assertLessEqual(len(c), 1000)
+            self.assertFalse(c.startswith("\n"))
+        self.assertEqual("\n".join(chunks), text)
+
+    def test_hard_cut_without_newline(self):
+        chunks = hal.split_telegram_text("y" * 250, limit=100)
+        self.assertEqual([len(c) for c in chunks], [100, 100, 50])
+
+
+class TestStatisticheCommand(unittest.TestCase):
+    def test_registry_and_aliases(self):
+        for form in ["/statistiche", "/stats", "/analytics", "/report"]:
+            spec = hal._find_command(form)
+            self.assertIsNotNone(spec)
+            self.assertEqual(spec["canonical"], "/statistiche")
+
+    def test_did_you_mean(self):
+        self.assertEqual(hal._suggest_command("/statistice"), "/statistiche")
+        self.assertEqual(hal._suggest_command("/analytic"), "/analytics")
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])):
+            hal.dispatch_command("/statistiche", {}, [])  # sanity: handled
+            hal.dispatch_command("/analitycs", {}, [])
+        self.assertTrue(any("/analytics" in s for s in sent))
+
+    def test_in_help(self):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])):
+            hal._cmd_aiuto("", {}, [])
+        self.assertIn("/statistiche", sent[0])
+
+    def test_not_configured(self):
+        sent = []
+        with patch.object(hal, "BLOG_ANALYTICS_TOKEN", ""), \
+             patch.object(hal, "fetch_analytics_report") as f, \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])):
+            hal._cmd_statistiche("", {}, [])
+        f.assert_not_called()
+        self.assertEqual(len(sent), 1)
+        self.assertIn("non configurate", sent[0])
+
+    def test_success_edits_placeholder_plain_text(self):
+        edits = []
+        with patch.object(hal, "BLOG_ANALYTICS_TOKEN", "t"), \
+             patch.object(hal, "fetch_analytics_report", return_value=(True, "Report *_<x>")), \
+             patch.object(hal, "tg_send", return_value={"ok": True, "result": {"message_id": 7}}) as ts, \
+             patch.object(hal, "tg_edit_message", side_effect=lambda *a, **k: edits.append((a, k))):
+            hal._cmd_statistiche("", {}, [])
+        self.assertEqual(ts.call_count, 1)  # only the placeholder
+        self.assertIn("Recupero", ts.call_args[0][0])
+        self.assertEqual(edits[0][0], (7, "Report *_<x>"))
+        self.assertIsNone(edits[0][1]["parse_mode"])
+
+    def test_long_report_split(self):
+        text = "\n".join(["z" * 100] * 80)
+        with patch.object(hal, "BLOG_ANALYTICS_TOKEN", "t"), \
+             patch.object(hal, "fetch_analytics_report", return_value=(True, text)), \
+             patch.object(hal, "tg_send", return_value={"ok": True, "result": {"message_id": 7}}) as ts, \
+             patch.object(hal, "tg_edit_message") as te:
+            hal._cmd_statistiche("", {}, [])
+        te.assert_called_once()
+        self.assertGreaterEqual(ts.call_count, 2)
+        self.assertIsNone(ts.call_args[1]["parse_mode"])
+
+    def test_error_kinds_have_distinct_messages(self):
+        seen = set()
+        for kind in ["unauthorized", "not_configured", "timeout", "network", "unavailable"]:
+            edits = []
+            with patch.object(hal, "BLOG_ANALYTICS_TOKEN", "t"), \
+                 patch.object(hal, "fetch_analytics_report", return_value=(False, kind)), \
+                 patch.object(hal, "tg_send", return_value={"ok": True, "result": {"message_id": 3}}), \
+                 patch.object(hal, "tg_edit_message", side_effect=lambda *a, **k: edits.append(a)):
+                hal._cmd_statistiche("", {}, [])
+            self.assertEqual(edits[0][0], 3)
+            seen.add(edits[0][1])
+        self.assertEqual(len(seen), 5)
+
+    def test_tg_send_omits_parse_mode_when_none(self):
+        with patch.object(hal, "tg_request") as r:
+            hal.tg_send("hi", parse_mode=None)
+            hal.tg_send("hi")
+        self.assertNotIn("parse_mode", r.call_args_list[0][0][1])
+        self.assertEqual(r.call_args_list[1][0][1]["parse_mode"], "HTML")
+
+
+class TestShouldSendAnalyticsReport(unittest.TestCase):
+    def setUp(self):
+        self.tz = hal.get_report_tz("Europe/Rome")
+
+    def dt(self, y, mo, d, h=7, mi=0):
+        return hal.datetime(y, mo, d, h, mi, tzinfo=self.tz)
+
+    def send(self, now, last=None, attempts=None):
+        return hal.should_send_analytics_report(now, last, attempts or {}, hour=7)
+
+    # 2026-10-12 is a Monday
+    def test_before_hour(self):
+        self.assertFalse(self.send(self.dt(2026, 10, 12, 6, 59)))
+
+    def test_at_hour(self):
+        self.assertTrue(self.send(self.dt(2026, 10, 12, 7, 0)))
+
+    def test_after_hour_same_monday(self):
+        self.assertTrue(self.send(self.dt(2026, 10, 12, 21, 30)))
+
+    def test_tuesday_wednesday_catchup(self):
+        self.assertTrue(self.send(self.dt(2026, 10, 13, 3)))
+        self.assertTrue(self.send(self.dt(2026, 10, 14, 23, 59)))
+
+    def test_thursday_skip(self):
+        self.assertFalse(self.send(self.dt(2026, 10, 15, 10)))
+
+    def test_already_sent(self):
+        self.assertFalse(self.send(self.dt(2026, 10, 12, 8), last="2026-W42"))
+
+    def test_week_rollover(self):
+        self.assertTrue(self.send(self.dt(2026, 10, 19, 8), last="2026-W42"))
+
+    def test_retry_spacing(self):
+        now = self.dt(2026, 10, 12, 8, 0)
+        att = {"week": "2026-W42", "count": 1, "last_attempt_ts": now.timestamp() - 29 * 60}
+        self.assertFalse(self.send(now, attempts=att))
+        att["last_attempt_ts"] = now.timestamp() - 30 * 60
+        self.assertTrue(self.send(now, attempts=att))
+
+    def test_attempt_cap(self):
+        now = self.dt(2026, 10, 13, 8)
+        att = {"week": "2026-W42", "count": 4, "last_attempt_ts": now.timestamp() - 7200}
+        self.assertFalse(self.send(now, attempts=att))
+        att["count"] = 3
+        self.assertTrue(self.send(now, attempts=att))
+
+    def test_old_week_attempts_ignored(self):
+        now = self.dt(2026, 10, 19, 8)
+        att = {"week": "2026-W42", "count": 4, "last_attempt_ts": now.timestamp() - 60}
+        self.assertTrue(self.send(now, attempts=att))
+
+    def test_dst_change_mondays(self):
+        # Monday after spring-forward (2026-03-29) and after fall-back (2026-10-25)
+        self.assertFalse(self.send(self.dt(2026, 3, 30, 6, 59)))
+        self.assertTrue(self.send(self.dt(2026, 3, 30, 7, 0)))
+        self.assertFalse(self.send(self.dt(2026, 10, 26, 6, 59)))
+        self.assertTrue(self.send(self.dt(2026, 10, 26, 7, 0)))
+
+    def test_iso_week_key_year_boundary(self):
+        self.assertEqual(hal.iso_week_key(hal.datetime(2026, 12, 31)), "2026-W53")
+        self.assertEqual(hal.iso_week_key(hal.datetime(2027, 1, 1)), "2026-W53")
+
+
+class TestReportHourParsing(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(hal._parse_report_hour("9"), 9)
+        self.assertEqual(hal._parse_report_hour("abc"), 7)
+        self.assertEqual(hal._parse_report_hour("24"), 7)
+        self.assertEqual(hal._parse_report_hour("0"), 0)
+
+
+class TestRomeFallbackTz(unittest.TestCase):
+    def test_matches_zoneinfo(self):
+        try:
+            from zoneinfo import ZoneInfo
+            ref = ZoneInfo("Europe/Rome")
+        except Exception:
+            self.skipTest("tzdata unavailable")
+        fb = hal._EuropeRomeFallback()
+        t = hal.datetime(2026, 1, 1, tzinfo=hal.timezone.utc)
+        while t.year == 2026:
+            self.assertEqual(t.astimezone(fb).utcoffset(), t.astimezone(ref).utcoffset(), t)
+            t += hal.timedelta(hours=1)
+
+
+class TestMaybeSendAnalyticsReport(unittest.TestCase):
+    def setUp(self):
+        self.tz = hal.get_report_tz("Europe/Rome")
+        self.patches = [
+            patch.object(hal, "BLOG_ANALYTICS_TOKEN", "t"),
+            patch.object(hal, "ANALYTICS_REPORT_ENABLED", True),
+            patch.object(hal, "ANALYTICS_REPORT_HOUR", 7),
+            patch.object(hal, "save_state"),
+            patch.object(hal, "load_state", return_value={}),
+        ]
+        for p in self.patches:
+            p.start()
+        self.now = hal.datetime(2026, 10, 12, 8, 0, tzinfo=self.tz)
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def test_disabled_without_token(self):
+        with patch.object(hal, "BLOG_ANALYTICS_TOKEN", ""), \
+             patch.object(hal, "fetch_analytics_report") as f:
+            hal.maybe_send_analytics_report({}, self.now)
+        f.assert_not_called()
+
+    def test_disabled_by_flag(self):
+        with patch.object(hal, "ANALYTICS_REPORT_ENABLED", False), \
+             patch.object(hal, "fetch_analytics_report") as f:
+            hal.maybe_send_analytics_report({}, self.now)
+        f.assert_not_called()
+
+    def test_success_sets_last_week_once(self):
+        state = {}
+        with patch.object(hal, "fetch_analytics_report", return_value=(True, "R")) as f, \
+             patch.object(hal, "tg_send") as ts:
+            hal.maybe_send_analytics_report(state, self.now)
+            hal.maybe_send_analytics_report(state, self.now)
+        self.assertEqual(state["analytics_report_last_week"], "2026-W42")
+        self.assertEqual(f.call_count, 1)
+        ts.assert_called_once_with("R", parse_mode=None)
+
+    def test_failure_retries_then_single_notice(self):
+        state = {}
+        sent = []
+        with patch.object(hal, "fetch_analytics_report", return_value=(False, "network")) as f, \
+             patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])):
+            for i in range(8):
+                hal.maybe_send_analytics_report(state, self.now + hal.timedelta(minutes=31 * i))
+        self.assertEqual(f.call_count, 4)
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("analytics_report_last_week", state)
+
+    def test_exception_is_swallowed(self):
+        with patch.object(hal, "fetch_analytics_report", side_effect=RuntimeError("boom")):
+            hal.maybe_send_analytics_report({}, self.now)
+
+    def test_persisted_week_prevents_duplicate(self):
+        with patch.object(hal, "load_state", return_value={"analytics_report_last_week": "2026-W42"}), \
+             patch.object(hal, "fetch_analytics_report") as f:
+            hal.maybe_send_analytics_report({}, self.now)
+        f.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
 

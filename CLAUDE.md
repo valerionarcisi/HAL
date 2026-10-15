@@ -76,6 +76,7 @@ These are non-negotiable. If you are about to do any of these, stop and ask.
 - **Never put batches inside `state.json` again.** This was an actual bug: the main thread's `save_state()` wiped batches added by the queue worker because it serialized stale in-memory state. Batches live in `batches.json`. Requests live in `requests.json`. They MUST stay separate.
 - **Never break the alias registry.** Every command MUST be reachable via its canonical Italian name AND English aliases. If you add a command, update the registry + add the alias map + add a typo "did you mean?" entry.
 - **Never `print()` for user feedback.** Telegram-facing output via `tg_send` / `tg_edit_message`. Local diagnostics via the `logging` module.
+- **Keep the analytics report optional and non-blocking.** `BLOG_ANALYTICS_TOKEN` must never become required, and `maybe_send_analytics_report()` must stay wrapped in try/except with bounded timeouts: a blog outage must never stall or crash the scan/polling loop. Report text is sent with NO `parse_mode`. Never log the token or the response body.
 - **Never re-introduce the legacy OpenSubtitles XML-RPC client.** REST v1 is the only path. Old `OS_USERNAME` / `OS_PASSWORD` env vars are kept as no-ops for backwards compat — do not wire them to anything.
 - **Never trust filenames without `parse_video()` + `_strip_scraper_noise()`.** Real-world inputs contain `www.SceneTime.com - Title (2002).mkv`, `[YTS.MX] Title.2002.mkv`, etc.
 - **Never depend on a non-stdlib library in tests.** Tests run with `python3 -m unittest` and nothing else.
@@ -241,6 +242,12 @@ Radarr (enables `/scarica`):
 - `RADARR_ROOT_FOLDER` — default: first folder from `/rootFolder`
 - `RADARR_QUALITY_PROFILE` — default: first profile
 - `RADARR_PREFERRED_LANGUAGES` — default `ITA,ENG`
+
+Blog analytics report (enables `/statistiche` + Monday auto-report):
+
+- `BLOG_ANALYTICS_TOKEN` — required for the feature; unset = feature silently disabled, HAL still starts
+- `BLOG_ANALYTICS_URL` — default `https://valerionarcisi.me/api/analytics-report`
+- `ANALYTICS_REPORT_ENABLED` (`0` disables the scheduler only), `ANALYTICS_REPORT_HOUR` (default 7), `ANALYTICS_REPORT_TZ` (default `Europe/Rome`)
 
 Legacy (kept as no-ops, do not wire):
 

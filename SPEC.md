@@ -259,6 +259,44 @@ Type any text in Telegram to search. Handles dots/underscores in filenames (e.g.
 - **Post-grab verification**: each grabbed release stores `required_lang` in `requests.json` (`null` when no filter was applied or when the target was MULTI/DUAL). When the file lands and `_save_sub_and_update_state` matches a pending request, `verify_audio_language(video_path, required_lang)` inspects ffprobe `language` and `title` tags. On match → normal `📬 Pronto` notification. On mismatch → warning with `[✅ Tieni]` / `[🔁 Ri-richiedi]` inline buttons. The redo path skips TMDb / Radarr re-add and shows a fresh release list filtered on the same language, excluding the release the user just rejected.
 - **False-positive safety**: release-title detection splits on non-alpha characters so 2-letter codes like `IT`, `EN`, `JP` never match inside common English words (HOBBIT, LIMIT, WHITE, iTunes).
 
+## Blog Analytics Report (`/statistiche`)
+
+HAL relays the weekly analytics report of the owner's blog. The blog renders the finished Italian report; HAL only fetches and delivers it.
+
+### Endpoint contract
+
+`GET {BLOG_ANALYTICS_URL}?period=week` with `Authorization: Bearer {BLOG_ANALYTICS_TOKEN}`.
+
+| Response | Meaning | HAL error kind |
+|---|---|---|
+| 200 `text/plain; charset=utf-8` | Finished report (max ~3500 chars) | ok |
+| 401 | Wrong token | `unauthorized` |
+| 503 | Endpoint not configured on the blog | `not_configured` |
+| 5xx / other | Failure | `unavailable` |
+| timeout / connection error | Failure | `timeout` / `network` |
+
+`fetch_analytics_report(url, token, timeout=15)` returns `(ok, text_or_error_kind)`. One retry (short backoff) on timeout / 5xx / network error, never on 401/503. Token and body are never logged. `period` is the constant `ANALYTICS_REPORT_PERIOD` (`week` is the only value today).
+
+### Delivery
+
+The report is sent as plain text (no `parse_mode`, so special characters cannot break it), split at a newline if longer than 4096 chars. `/statistiche` (aliases `/stats`, `/analytics`, `/report`) sends a "⏳ Recupero le statistiche…" placeholder and edits it in place with the report or a per-error Italian message.
+
+### Scheduler
+
+Driven by the main loop (no extra thread), via `maybe_send_analytics_report(state)` -> pure `should_send_analytics_report(now_local, last_week, attempts_state)`:
+
+- Active only when `BLOG_ANALYTICS_TOKEN` is set and `ANALYTICS_REPORT_ENABLED` is not `0`.
+- Monday from `ANALYTICS_REPORT_HOUR` (local TZ); if HAL was down, it catches up later on Monday and on Tuesday/Wednesday (until 23:59); from Thursday it skips until next Monday.
+- Failed attempts retry at most every 30 minutes, 4 attempts per ISO week; after the 4th failure ONE short Italian notice is sent and HAL gives up until next week.
+- The fetch runs on the main thread, bounded (2 x 15 s + backoff) and wrapped in try/except: it can never crash the loop.
+
+### State
+
+Keys in `state.json` (main thread owns them; the scheduler also cross-checks the persisted file, since the queue worker saves its own copy):
+
+- `analytics_report_last_week`: ISO week of the last successful send, e.g. `"2026-W42"`.
+- `analytics_report_attempts`: `{"week", "count", "last_attempt_ts", "notice_sent"}` for the current week; cleared on success. The attempt is recorded before the fetch.
+
 ## Configuration (Environment Variables)
 | Variable | Required | Description |
 |---|---|---|
@@ -269,6 +307,11 @@ Type any text in Telegram to search. Handles dots/underscores in filenames (e.g.
 | `TMDB_API_KEY` | Recommended | TMDb v3 API key (free, unlimited). Enables IMDb ID resolution from title+year |
 | `CLAUDE_API_KEY` | No | Enables EN→IT translation fallback |
 | `CLAUDE_MODEL` | No | Default: `claude-sonnet-4-20250514` |
+| `BLOG_ANALYTICS_TOKEN` | No | Bearer token for the blog analytics endpoint. Unset = `/statistiche` replies "not configured" and the weekly scheduler is off |
+| `BLOG_ANALYTICS_URL` | No | Default `https://valerionarcisi.me/api/analytics-report` |
+| `ANALYTICS_REPORT_ENABLED` | No | `0` disables only the weekly scheduler (the command still works). Default on |
+| `ANALYTICS_REPORT_HOUR` | No | Local hour (0-23) of the Monday send. Default `7` |
+| `ANALYTICS_REPORT_TZ` | No | IANA timezone for the schedule. Default `Europe/Rome` (built-in CET/CEST fallback if tzdata is missing) |
 | `OS_USERNAME` | No | Legacy, unused (kept for backwards compat) |
 | `OS_PASSWORD` | No | Legacy, unused (kept for backwards compat) |
 | `YT_COOKIES_FILE` | No | Path inside the container to a Netscape cookies.txt used by yt-dlp for `/cerca` YouTube downloads. Default `/config/secrets/yt_cookies.txt`. Missing file = no cookies (fewer YouTube results, no hard error). |

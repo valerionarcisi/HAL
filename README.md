@@ -84,6 +84,12 @@ hal:
     - RADARR_ROOT_FOLDER=/media/films                         # optional, defaults to Radarr's own default
     - RADARR_QUALITY_PROFILE=HD-1080p                         # optional, defaults to Radarr's own default
     - RADARR_PREFERRED_LANGUAGES=ITA,ENG                      # optional, default ITA,ENG
+    # Weekly blog analytics report (/statistiche) — optional, disabled without the token
+    - BLOG_ANALYTICS_TOKEN=your_blog_analytics_token          # optional, enables /statistiche + the Monday report
+    - BLOG_ANALYTICS_URL=https://valerionarcisi.me/api/analytics-report   # optional, default shown
+    - ANALYTICS_REPORT_ENABLED=1                              # optional, "0" disables only the weekly scheduler
+    - ANALYTICS_REPORT_HOUR=7                                 # optional, default 7 (local time)
+    - ANALYTICS_REPORT_TZ=Europe/Rome                         # optional, default shown
     # /cerca (multi-source film download) — optional overrides
     - YT_COOKIES_FILE=/config/secrets/yt_cookies.txt          # optional, default shown
     - YTDLP_BINARY=yt-dlp                                     # optional, default shown
@@ -131,6 +137,7 @@ Type `@<bot_username> <text>` in **any** Telegram chat (not just HAL's own) to g
 | `/stato` | `/status`, `/st` | Current state summary |
 | `/coda` | `/queue`, `/q` | Show currently queued jobs |
 | `/costi` | `/costs`, `/cost` | DeepL chars + Claude polish cost + Claude fallback cost (separate sections) |
+| `/statistiche` | `/stats`, `/analytics`, `/report` | Blog analytics report (also sent automatically every Monday; needs `BLOG_ANALYTICS_TOKEN`) |
 | `/falliti` | `/failed` | List failed videos, with a "Retry all" inline button |
 | `/esclusi` | `/excludes` | List excluded folders |
 | `/log [n]` | `/logs` | Tail the last n log lines (default 30, max 200) |
