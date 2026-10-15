@@ -88,6 +88,7 @@ POLISH_TRANSLATION = os.environ.get("POLISH_TRANSLATION", "true").lower() in ("1
 # Radarr integration (/scarica command — request new films from Telegram).
 RADARR_URL = os.environ.get("RADARR_URL", "").rstrip("/")
 RADARR_API_KEY = os.environ.get("RADARR_API_KEY", "")
+BLOG_ANALYTICS_TOKEN = os.environ.get("BLOG_ANALYTICS_TOKEN", "")
 RADARR_ROOT_FOLDER = os.environ.get("RADARR_ROOT_FOLDER", "")
 RADARR_QUALITY_PROFILE = os.environ.get("RADARR_QUALITY_PROFILE", "")
 RADARR_PREFERRED_LANGUAGES = [
@@ -7631,6 +7632,11 @@ def process_callbacks(state, excludes):
 # MANUAL SEARCH BY NAME
 # =============================================================================
 
+def _norm_match(text):
+    """Lowercase text with all punctuation collapsed to single spaces (so ':' vs '-' vs '.' don't matter)."""
+    return re.sub(r"[\W_]+", " ", text).strip()
+
+
 def find_videos_by_name(query):
     """Search media folders for videos matching a query string."""
     query_lower = query.lower()
@@ -7651,9 +7657,9 @@ def find_videos_by_name(query):
                 fname_lower = fname.lower()
 
                 # Also match with dots/underscores replaced by spaces
-                fname_clean = re.sub(r"[._\-]", " ", fname_lower)
-                folder_clean = re.sub(r"[._\-]", " ", folder_name)
-                query_clean = re.sub(r"[._\-]", " ", query_lower)
+                fname_clean = _norm_match(fname_lower)
+                folder_clean = _norm_match(folder_name)
+                query_clean = _norm_match(query_lower)
 
                 if (query_lower in folder_name or query_lower in fname_lower
                     or query_clean in folder_clean or query_clean in fname_clean):
@@ -7720,7 +7726,7 @@ def offer_delete(query, state):
 
 def find_films_by_name(query):
     """Search FILMS_PATH only, one match per film folder (not per file inside it)."""
-    query_clean = re.sub(r"[._\-]", " ", query.lower())
+    query_clean = _norm_match(query.lower())
     seen_folders = {}
     if not os.path.exists(FILMS_PATH):
         return []
@@ -7730,7 +7736,7 @@ def find_films_by_name(query):
                 continue
             full_path = os.path.join(root, fname)
             folder_name = get_series_folder(full_path)
-            folder_clean = re.sub(r"[._\-]", " ", folder_name.lower())
+            folder_clean = _norm_match(folder_name.lower())
             if query_clean in folder_clean:
                 folder = os.path.join(FILMS_PATH, folder_name)
                 seen_folders.setdefault(folder, full_path)
