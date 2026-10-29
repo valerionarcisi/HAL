@@ -113,6 +113,10 @@ BLOG_ANALYTICS_TOKEN = os.environ.get("BLOG_ANALYTICS_TOKEN", "")
 BLOG_ANALYTICS_URL = os.environ.get(
     "BLOG_ANALYTICS_URL", "https://valerionarcisi.me/api/analytics-report"
 ).strip()
+# Contacts radar engine (optional: /casa is disabled when unset). HAL only queues a row in
+# the engine's Turso DB; the engine does the crawling and replies on Telegram.
+TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL", "").strip()
+TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "")
 ANALYTICS_REPORT_ENABLED = os.environ.get("ANALYTICS_REPORT_ENABLED", "1").strip() != "0"
 ANALYTICS_REPORT_TZ = os.environ.get("ANALYTICS_REPORT_TZ", "Europe/Rome").strip()
 
@@ -6996,6 +7000,117 @@ def maybe_send_analytics_report(state, now_local=None):
         log.error(f"analytics: scheduler error {type(e).__name__}: {e}", exc_info=True)
 
 
+HOUSE_DEFAULT_PROJECT = "walkie-talkie"
+HOUSE_PROJECT_WORDS = {
+    "produzione": "walkie-talkie", "production": "walkie-talkie", "prod": "walkie-talkie",
+    "distribuzione": "non-fa-ridere", "distribution": "non-fa-ridere", "dist": "non-fa-ridere",
+}
+_HOUSE_URL_RE = re.compile(r"https?://[^\s<>()\[\]]+", re.IGNORECASE)
+_HOUSE_DOMAIN_RE = re.compile(r"(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>()\[\]]*)?", re.IGNORECASE)
+
+
+def parse_house_args(arg):
+    """Parse '/casa' arguments into (url, project, error).
+    error is None, 'missing' (no site given) or 'invalid' (not a usable http(s) site).
+    Accepts a full URL, a bare domain or a Markdown link, plus an optional keyword
+    (produzione|distribuzione) that picks the film the house is meant for."""
+    text = (arg or "").strip()
+    if not text:
+        return None, HOUSE_DEFAULT_PROJECT, "missing"
+    project = HOUSE_DEFAULT_PROJECT
+    for word in re.findall(r"[A-Za-z]+", text):
+        if word.lower() in HOUSE_PROJECT_WORDS:
+            project = HOUSE_PROJECT_WORDS[word.lower()]
+    match = _HOUSE_URL_RE.search(text)
+    if match:
+        raw = match.group(0)
+    else:
+        if "://" in text or ":" in text.split()[0] and not _HOUSE_DOMAIN_RE.match(text):
+            return None, project, "invalid"
+        found = _HOUSE_DOMAIN_RE.search(text)
+        if not found:
+            only_keywords = all(w.lower() in HOUSE_PROJECT_WORDS for w in text.split())
+            return None, project, "missing" if only_keywords else "invalid"
+        raw = "https://" + found.group(0)
+    raw = raw.rstrip(".,;:!?")
+    parsed = urllib.parse.urlsplit(raw)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or "." not in host or len(raw) > 300:
+        return None, project, "invalid"
+    return raw, project, None
+
+
+def turso_execute(sql, args, timeout=10):
+    """Run one statement on the radar engine's Turso DB through its HTTP pipeline API.
+    Returns (True, None) or (False, error_kind) with error_kind in
+    unauthorized | timeout | unavailable. Neither the token nor the response body is logged."""
+    base = TURSO_DATABASE_URL.replace("libsql://", "https://").rstrip("/")
+    payload = {"requests": [
+        {"type": "execute", "stmt": {"sql": sql, "args": [{"type": "text", "value": str(a)} for a in args]}},
+        {"type": "close"},
+    ]}
+    try:
+        req = urllib.request.Request(
+            base + "/v2/pipeline", data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "HAL/1.0"})
+        # unredirected: never hand the bearer token to a redirect target
+        req.add_unredirected_header("Authorization", f"Bearer {TURSO_AUTH_TOKEN}")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8", errors="replace"))
+        first = (body.get("results") or [{}])[0]
+        if first.get("type") != "ok":
+            log.warning("turso: statement rejected")
+            return False, "unavailable"
+        return True, None
+    except urllib.error.HTTPError as e:
+        code = getattr(e, "code", 0)
+        log.warning(f"turso: request failed status={code}")
+        return False, "unauthorized" if code in (401, 403) else "unavailable"
+    except (socket.timeout, TimeoutError):
+        log.warning("turso: request timed out")
+        return False, "timeout"
+    except Exception as e:
+        log.warning(f"turso: request failed {type(e).__name__}")
+        return False, "unavailable"
+
+
+def enqueue_house_request(url, project):
+    """Queue an 'add_house' request for the radar engine."""
+    if not (TURSO_DATABASE_URL and TURSO_AUTH_TOKEN):
+        return False, "not_configured"
+    return turso_execute(
+        "INSERT INTO radar_requests(kind, project, url) VALUES('add_house', ?, ?)", [project, url])
+
+
+_HOUSE_ERROR_TEXT = {
+    "not_configured": "⚙️ Il motore dei contatti non è collegato a HAL (mancano TURSO_DATABASE_URL e TURSO_AUTH_TOKEN).",
+    "unauthorized": "🔑 Il database dei contatti ha rifiutato il token di HAL (TURSO_AUTH_TOKEN errato).",
+    "timeout": "⏱️ Il database dei contatti non risponde. Riprova tra poco.",
+    "unavailable": "⚠️ Non riesco ad accodare la richiesta al motore dei contatti. Riprova più tardi.",
+}
+
+
+def _cmd_casa(arg, state, excludes):
+    url, project, error = parse_house_args(arg)
+    if error == "missing":
+        tg_send("🏠 Scrivi il sito della casa, ad esempio:\n"
+                "/casa visionifuture.it\n"
+                "/casa visionifuture.it distribuzione\n"
+                "Di default la cerco come casa di produzione (Walkie Talkie).")
+        return
+    if error:
+        tg_send("🤔 Non riconosco un sito in quel messaggio. Mandami l'indirizzo, ad esempio visionifuture.it.")
+        return
+    ok, kind = enqueue_house_request(url, project)
+    if not ok:
+        tg_send(_HOUSE_ERROR_TEXT.get(kind, _HOUSE_ERROR_TEXT["unavailable"]))
+        return
+    host = html.escape(urllib.parse.urlsplit(url).hostname or url)
+    film = "Non fa ridere (distribuzione)" if project == "non-fa-ridere" else "Walkie Talkie (produzione)"
+    tg_send(f"🏠 Ricevuto: cerco email, Instagram e LinkedIn di {host} per {film}. "
+            "Ti scrivo qui i risultati entro un minuto.")
+
+
 # Registry — single source of truth for /aiuto and the dispatcher.
 # `canonical` is the form shown in /aiuto. `aliases` are interchangeable.
 # `group` controls the section in /aiuto.
@@ -7073,6 +7188,11 @@ COMMANDS = [
      "group": "Stato & manutenzione", "args": "",
      "desc": "Azzera la cache (riparte da zero)"},
 
+    # Film contacts
+    {"canonical": "/casa", "aliases": ["/house", "/company"], "handler": _cmd_casa,
+     "group": "Contatti film", "args": "<sito> [produzione|distribuzione]",
+     "desc": "Aggiunge una casa di produzione/distribuzione e cerca dal suo sito email, Instagram e LinkedIn"},
+
     # Help (defined last so it can introspect the others)
     {"canonical": "/aiuto", "aliases": ["/help", "/?"], "handler": None,
      "group": "Stato & manutenzione", "args": "",
@@ -7117,8 +7237,8 @@ def _cmd_aiuto(arg, state, excludes):
     for c in COMMANDS:
         groups.setdefault(c["group"], []).append(c)
 
-    section_order = ["Cerca & scarica", "Gestione sub", "Stato & manutenzione"]
-    emoji = {"Cerca & scarica": "🔍", "Gestione sub": "🔄", "Stato & manutenzione": "ℹ️"}
+    section_order = ["Cerca & scarica", "Gestione sub", "Contatti film", "Stato & manutenzione"]
+    emoji = {"Cerca & scarica": "🔍", "Gestione sub": "🔄", "Contatti film": "🎬", "Stato & manutenzione": "ℹ️"}
 
     lines = ["🤖 <b>HAL — comandi</b>"]
     for section in section_order:
