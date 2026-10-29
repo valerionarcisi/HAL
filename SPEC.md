@@ -307,6 +307,7 @@ Keys in `state.json` (main thread owns them; the scheduler also cross-checks the
 | `TMDB_API_KEY` | Recommended | TMDb v3 API key (free, unlimited). Enables IMDb ID resolution from title+year |
 | `CLAUDE_API_KEY` | No | Enables EN→IT translation fallback |
 | `CLAUDE_MODEL` | No | Default: `claude-sonnet-4-20250514` |
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | No | Turso DB of the contacts radar engine (separate service on the NAS). Both set = `/casa` queues requests there; either unset = `/casa` replies "not configured" and HAL starts normally |
 | `BLOG_ANALYTICS_TOKEN` | No | Bearer token for the blog analytics endpoint. Unset = `/statistiche` replies "not configured" and the weekly scheduler is off |
 | `BLOG_ANALYTICS_URL` | No | Default `https://valerionarcisi.me/api/analytics-report` |
 | `ANALYTICS_REPORT_ENABLED` | No | `0` disables only the weekly scheduler (the command still works). Default on |
@@ -532,3 +533,19 @@ Bot:   "✅ Pronto: Punch-Drunk Love (2002) — sub ITA scaricato"
 ### Estimated complexity
 - ~400 lines: `RadarrClient` with release support (~140), TMDb multi-search (~30), command + 5 callbacks + pagination (~140), state plumbing (~50), tests (~40 cases).
 - ~3-4 hours of focused work, mostly Radarr-side configuration and end-to-end testing on a real install with at least one configured indexer.
+
+
+## `/casa` — add a house to the contacts radar
+
+`/casa <site> [produzione|distribuzione]` (aliases `/house`, `/company`). The site can be a URL, a bare
+domain or a Markdown link; the keyword picks the film the house is for (`produzione` = Walkie Talkie, the
+default; `distribuzione` = Non fa ridere).
+
+HAL does **not** crawl anything itself. `parse_house_args()` validates the input (http/https only, a dotted
+host, max 300 chars) and `enqueue_house_request()` inserts one row into the engine's `radar_requests`
+table through the Turso HTTP pipeline API (`turso_execute()`: 10 s timeout, bearer token sent as an
+unredirected header, token and body never logged). The radar engine (`/home/Valerio/radar`) picks the row
+up within a minute, reads the site, extracts emails (with MX check), Instagram and LinkedIn links and
+people, stores the house and replies in the same chat with what it found.
+
+Failure kinds shown to the user: `not_configured`, `unauthorized`, `timeout`, `unavailable`.

@@ -86,6 +86,9 @@ hal:
     - RADARR_PREFERRED_LANGUAGES=ITA,ENG                      # optional, default ITA,ENG
     # Weekly blog analytics report (/statistiche) — optional, disabled without the token
     - BLOG_ANALYTICS_TOKEN=your_blog_analytics_token          # optional, enables /statistiche + the Monday report
+    # Film contacts radar (/casa) — optional, disabled without both values
+    - TURSO_DATABASE_URL=libsql://your-radar-db.turso.io      # optional, enables /casa
+    - TURSO_AUTH_TOKEN=your_turso_token
     - BLOG_ANALYTICS_URL=https://valerionarcisi.me/api/analytics-report   # optional, default shown
     - ANALYTICS_REPORT_ENABLED=1                              # optional, "0" disables only the weekly scheduler
     - ANALYTICS_REPORT_HOUR=7                                 # optional, default 7 (local time)
@@ -137,6 +140,7 @@ Type `@<bot_username> <text>` in **any** Telegram chat (not just HAL's own) to g
 | `/stato` | `/status`, `/st` | Current state summary |
 | `/coda` | `/queue`, `/q` | Show currently queued jobs |
 | `/costi` | `/costs`, `/cost` | DeepL chars + Claude polish cost + Claude fallback cost (separate sections) |
+| `/casa <site> [produzione\|distribuzione]` | `/house`, `/company` | Add a production/distribution house and look up its emails, Instagram and LinkedIn from its website. HAL only queues the request; the radar engine does the crawl and replies in the chat (needs `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`) |
 | `/statistiche` | `/stats`, `/analytics`, `/report` | Blog analytics report (also sent automatically every Monday; needs `BLOG_ANALYTICS_TOKEN`) |
 | `/falliti` | `/failed` | List failed videos, with a "Retry all" inline button |
 | `/esclusi` | `/excludes` | List excluded folders |

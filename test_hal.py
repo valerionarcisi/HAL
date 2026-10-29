@@ -4157,6 +4157,130 @@ class TestMaybeSendAnalyticsReport(unittest.TestCase):
         f.assert_not_called()
 
 
+class TestParseHouseArgs(unittest.TestCase):
+    def test_full_url_defaults_to_production(self):
+        self.assertEqual(hal.parse_house_args("https://www.visionifuture.it"),
+                         ("https://www.visionifuture.it", "walkie-talkie", None))
+
+    def test_bare_domain_gets_https(self):
+        self.assertEqual(hal.parse_house_args("visionifuture.it"),
+                         ("https://visionifuture.it", "walkie-talkie", None))
+
+    def test_distribution_keyword_either_side(self):
+        self.assertEqual(hal.parse_house_args("visionifuture.it distribuzione")[1], "non-fa-ridere")
+        self.assertEqual(hal.parse_house_args("DIST visionifuture.it")[1], "non-fa-ridere")
+        self.assertEqual(hal.parse_house_args("visionifuture.it production")[1], "walkie-talkie")
+
+    def test_markdown_link_and_trailing_punctuation(self):
+        url, _, err = hal.parse_house_args("[www.visionifuture.it](https://www.visionifuture.it).")
+        self.assertIsNone(err)
+        self.assertEqual(url, "https://www.visionifuture.it")
+
+    def test_missing(self):
+        self.assertEqual(hal.parse_house_args("")[2], "missing")
+        self.assertEqual(hal.parse_house_args("   ")[2], "missing")
+        self.assertEqual(hal.parse_house_args("produzione")[2], "missing")
+
+    def test_invalid(self):
+        for bad in ["non un sito", "javascript:alert(1)", "ftp://x.it/file", "http://localhost", "x" * 400 + ".it"]:
+            self.assertEqual(hal.parse_house_args(bad)[2], "invalid", bad[:30])
+
+
+class TestEnqueueHouseRequest(unittest.TestCase):
+    TOKEN = "TURSO-SECRET-TOKEN"
+
+    def _enqueue(self, side_effect, configured=True):
+        url = "libsql://radar-test.turso.io" if configured else ""
+        token = self.TOKEN if configured else ""
+        with patch.object(hal, "TURSO_DATABASE_URL", url), patch.object(hal, "TURSO_AUTH_TOKEN", token), \
+             patch.object(hal.urllib.request, "urlopen", side_effect=side_effect) as m, \
+             self.assertLogs("hal", level="DEBUG") as logs:
+            hal.log.info("sentinel")
+            result = hal.enqueue_house_request("https://www.visionifuture.it", "walkie-talkie")
+        for line in logs.output:
+            self.assertNotIn(self.TOKEN, line)
+        return result, m
+
+    def test_ok_posts_one_insert_to_the_pipeline(self):
+        ok_body = json.dumps({"results": [{"type": "ok"}, {"type": "ok"}]}).encode()
+        (ok, err), m = self._enqueue([_FakeResp(ok_body)])
+        self.assertEqual((ok, err), (True, None))
+        req = m.call_args[0][0]
+        self.assertEqual(req.full_url, "https://radar-test.turso.io/v2/pipeline")
+        self.assertEqual(req.get_header("Authorization"), f"Bearer {self.TOKEN}")
+        sent = json.loads(req.data)
+        stmt = sent["requests"][0]["stmt"]
+        self.assertIn("INSERT INTO radar_requests", stmt["sql"])
+        self.assertEqual([a["value"] for a in stmt["args"]], ["walkie-talkie", "https://www.visionifuture.it"])
+
+    def test_not_configured_makes_no_request(self):
+        (ok, err), m = self._enqueue([], configured=False)
+        self.assertEqual((ok, err), (False, "not_configured"))
+        m.assert_not_called()
+
+    def test_unauthorized(self):
+        (ok, err), _ = self._enqueue([_http_error(401)])
+        self.assertEqual((ok, err), (False, "unauthorized"))
+
+    def test_server_error_and_network_error(self):
+        self.assertEqual(self._enqueue([_http_error(500)])[0], (False, "unavailable"))
+        self.assertEqual(self._enqueue([TimeoutError("t")])[0], (False, "timeout"))
+        self.assertEqual(self._enqueue([urllib.error.URLError("down")])[0], (False, "unavailable"))
+
+    def test_sql_error_in_a_result_counts_as_failure(self):
+        body = json.dumps({"results": [{"type": "error", "error": {"message": "no such table: radar_requests"}}]}).encode()
+        (ok, err), _ = self._enqueue([_FakeResp(body)])
+        self.assertEqual((ok, err), (False, "unavailable"))
+
+
+class TestCasaCommand(unittest.TestCase):
+    def test_registry_and_aliases(self):
+        for form in ["/casa", "/house", "/company"]:
+            spec = hal._find_command(form)
+            self.assertIsNotNone(spec, form)
+            self.assertEqual(spec["canonical"], "/casa")
+
+    def test_did_you_mean(self):
+        self.assertIn(hal._suggest_command("/csa"), {"/casa", "/cerca"})
+        self.assertEqual(hal._suggest_command("/hous"), "/house")
+
+    def test_listed_in_help(self):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])):
+            hal._cmd_aiuto("", {}, [])
+        self.assertTrue(any("/casa" in s for s in sent))
+
+    def _run(self, arg, enqueue_result=(True, None)):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])), \
+             patch.object(hal, "enqueue_house_request", return_value=enqueue_result) as enq:
+            hal._cmd_casa(arg, {}, [])
+        return sent, enq
+
+    def test_usage_without_argument(self):
+        sent, enq = self._run("")
+        enq.assert_not_called()
+        self.assertIn("/casa", sent[0])
+
+    def test_invalid_site_is_not_queued(self):
+        sent, enq = self._run("non un sito")
+        enq.assert_not_called()
+        self.assertIn("sito", sent[0].lower())
+
+    def test_happy_path_queues_and_confirms(self):
+        sent, enq = self._run("visionifuture.it")
+        enq.assert_called_once_with("https://visionifuture.it", "walkie-talkie")
+        self.assertIn("visionifuture.it", sent[0])
+
+    def test_each_failure_kind_has_its_own_message(self):
+        texts = set()
+        for kind in ["not_configured", "unauthorized", "timeout", "unavailable"]:
+            sent, _ = self._run("visionifuture.it", (False, kind))
+            self.assertEqual(len(sent), 1)
+            texts.add(sent[0])
+        self.assertEqual(len(texts), 4)
+
+
 if __name__ == "__main__":
     unittest.main()
 
