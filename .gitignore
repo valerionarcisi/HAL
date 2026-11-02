@@ -22,3 +22,15 @@ __pycache__/
 .DS_Store
 Thumbs.db
 secrets/
+
+# Radar engine (radar/)
+radar/.env
+radar/.env.*
+!radar/.env.example
+radar/**/*.db
+radar/**/*.sqlite*
+radar/**/__pycache__/
+radar/**/*.log
+radar/data/
+radar/cache/
+radar/secrets/
