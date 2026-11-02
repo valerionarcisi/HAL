@@ -425,4 +425,9 @@ def census_marche():
     return census_it.run_marche()
 
 
-JOBS = {"census:dgca": census_dgca, "census:distributori": census_distributori, "census:marche": census_marche, "requests": process_requests, "report": weekly_report, "discover": discover, "enrich_score": enrich_score, "draft": draft, "followup": followup, "send": send, "inbox": inbox}
+def census_enrich(limit=20):
+    from . import census_enrich as enrich
+    return enrich.run(limit)
+
+
+JOBS = {"census:enrich": census_enrich, "census:dgca": census_dgca, "census:distributori": census_distributori, "census:marche": census_marche, "requests": process_requests, "report": weekly_report, "discover": discover, "enrich_score": enrich_score, "draft": draft, "followup": followup, "send": send, "inbox": inbox}
