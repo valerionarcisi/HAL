@@ -80,6 +80,34 @@ DDL = [
         day TEXT PRIMARY KEY,
         data TEXT NOT NULL
     )""",
+    # Censimento: da dove viene ogni casa. Ogni casa del censimento ha almeno una riga qui.
+    """CREATE TABLE IF NOT EXISTS contact_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contact_id INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        source_name TEXT,
+        fetched_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(contact_id, url)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_contact_sources_contact ON contact_sources(contact_id)",
+    # Crediti: film prodotti o distribuiti, fondi e festival. year = 0 se la fonte non lo dice (così l'UNIQUE vale anche senza anno).
+    """CREATE TABLE IF NOT EXISTS credits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contact_id INTEGER NOT NULL,
+        person_id INTEGER,
+        title TEXT NOT NULL,
+        year INTEGER NOT NULL DEFAULT 0,
+        format TEXT,
+        genres TEXT,
+        role TEXT NOT NULL,
+        countries TEXT,
+        festivals TEXT,
+        funds TEXT,
+        source_url TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(contact_id, title, year, role)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_credits_contact ON credits(contact_id)",
     """CREATE TABLE IF NOT EXISTS radar_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         contact_id INTEGER,
@@ -101,6 +129,7 @@ DEFAULT_SETTINGS = {
     "no_repeat_days": "60",
     "drafts_per_run": "5",
     "llm_daily_calls": "40",   # tetto di chiamate al modello al giorno per i lavori automatici
+    "census_llm_daily_calls": "200",  # tetto separato per il censimento
 }
 
 SEED_SOURCES = [
@@ -108,8 +137,36 @@ SEED_SOURCES = [
 ]
 
 
+# Colonne aggiunte alle tabelle storiche: solo ADD COLUMN, mai riscritture. migrate() aggiunge quelle che mancano.
+NEW_COLUMNS = {
+    "contacts": [
+        ("kind", "TEXT"),  # production | short_distribution | theatrical_distribution | sales_agent | festival | other
+        ("phone", "TEXT"),  # solo pubblicato dalla casa, E.164
+        ("submission_url", "TEXT"),
+        ("do_not_contact", "INTEGER DEFAULT 0"),
+        ("do_not_contact_reason", "TEXT"),
+        ("last_verified_at", "TEXT"),
+        ("vat_id", "TEXT"),  # partita IVA, se pubblicata
+        ("profile_json", "TEXT"),  # profilo calcolato dai crediti (census.refresh_profile)
+    ],
+    "people": [
+        ("phone", "TEXT"),
+        ("last_verified_at", "TEXT"),
+    ],
+}
+
+
+def add_missing_columns():
+    for table, cols in NEW_COLUMNS.items():
+        have = {r["name"] for r in db.q(f"PRAGMA table_info({table})")}
+        for name, decl in cols:
+            if name not in have:
+                db.run(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def migrate():
     db.batch([(s, []) for s in DDL])
+    add_missing_columns()
     db.batch([("INSERT OR IGNORE INTO radar_settings(key, value) VALUES(?, ?)", [k, v]) for k, v in DEFAULT_SETTINGS.items()])
     db.batch([("INSERT OR IGNORE INTO radar_sources(name, url, kind, project, company_type, country) VALUES(?,?,?,?,?,?)", list(s)) for s in SEED_SOURCES])
     # Porta nella tabella per-progetto quello che oggi sta in contacts.project / priority / next_action.

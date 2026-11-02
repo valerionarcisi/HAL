@@ -148,10 +148,12 @@ def add_house(req):
 # ---------------------------------------------------------------- bozze e follow-up
 
 def _contact(contact_id, project):
-    c = db.one("""SELECT c.id, c.name, c.email, c.country, c.official_url, c.hook_title, c.fit_reason, cp.reason
+    c = db.one("""SELECT c.id, c.name, c.email, c.country, c.official_url, c.hook_title, c.fit_reason, c.do_not_contact, cp.reason
                   FROM contacts c LEFT JOIN contact_projects cp ON cp.contact_id = c.id AND cp.project = ? WHERE c.id = ?""", project, contact_id)
     if not c:
         raise RequestFailed("contatto non trovato")
+    if c["do_not_contact"]:
+        raise RequestFailed("la casa è segnata da non contattare")
     if "@" not in (c["email"] or ""):
         raise RequestFailed("la casa non ha un'email: aggiungila prima")
     return c

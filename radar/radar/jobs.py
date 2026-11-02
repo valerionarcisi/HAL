@@ -263,6 +263,7 @@ def draft(per_run=None):
                         FROM contact_projects cp JOIN contacts c ON c.id = cp.contact_id
                         WHERE cp.project=? AND cp.stage='to-contact' AND c.email LIKE '%@%'
                           AND c.verification_level='verified' AND (cp.shortlist=1 OR cp.score >= 65)
+                          AND coalesce(c.do_not_contact, 0) = 0
                         ORDER BY cp.shortlist DESC, cp.score DESC LIMIT 40""", project)
         for c in cands:
             if made >= per_run:
@@ -301,7 +302,8 @@ def followup():
                    WHERE o.status='sent' AND o.sent_at <= datetime('now', ?)
                      AND NOT EXISTS (SELECT 1 FROM radar_outbox f WHERE f.contact_id=o.contact_id AND f.project=o.project AND f.created_at > o.sent_at)
                      AND (SELECT count(*) FROM radar_outbox f WHERE f.contact_id=o.contact_id AND f.project=o.project AND f.kind='followup') < ?
-                     AND (SELECT stage FROM contact_projects WHERE contact_id=o.contact_id AND project=o.project) NOT IN ('replied','discarded')""",
+                     AND (SELECT stage FROM contact_projects WHERE contact_id=o.contact_id AND project=o.project) NOT IN ('replied','discarded')
+                     AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.id=o.contact_id AND c.do_not_contact=1)""",
                 f"-{st['followup_days']} days", int(st["max_followups"]))
     for o in rows:
         subj, body = FOLLOWUP[o["lang"] if o["lang"] in FOLLOWUP else "it"]
@@ -327,7 +329,10 @@ def send():
     room = int(st["daily_cap"]) - sent_today
     if room <= 0:
         return 0, 0, "tetto giornaliero raggiunto"
-    rows = db.q("SELECT * FROM radar_outbox WHERE status='approved' ORDER BY approved_at LIMIT ?", min(room, 3))
+    # Una casa da non contattare non riceve mai niente, nemmeno una bozza approvata prima.
+    rows = db.q("""SELECT * FROM radar_outbox WHERE status='approved'
+                   AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.id=radar_outbox.contact_id AND c.do_not_contact=1)
+                   ORDER BY approved_at LIMIT ?""", min(room, 3))
     sent = errors = 0
     addr, pwd = os.environ["EMAIL_ADDRESS"], os.environ["EMAIL_PASSWORD"]
     for o in rows:

@@ -1,6 +1,7 @@
 """Uso:
   python -m radar              scheduler sempre acceso (il container)
-  python -m radar migrate      crea le tabelle del motore
+  python -m radar migrate      crea le tabelle del motore e aggiunge le colonne mancanti
+  python -m radar dnc <dominio> <nome> <motivo>   segna come da non contattare le case con quel dominio o nome e annulla le bozze aperte
   python -m radar run <lavoro> lancia un lavoro una volta (discover, enrich_score, draft, followup, send, inbox)
 """
 import logging
@@ -9,7 +10,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-from . import db, schema
+from . import census, db, schema
 from .jobs import JOBS
 from .notify import telegram
 
@@ -71,6 +72,10 @@ def main(argv):
     elif argv[1] == "migrate":
         schema.migrate()
         print("ok")
+    elif argv[1] == "dnc" and len(argv) >= 5:
+        ids = census.find_by_domain_or_name(argv[2], argv[3])
+        print(f"case trovate: {ids}")
+        print(f"bozze annullate: {census.mark_do_not_contact(ids, argv[4])}")
     elif argv[1] == "run" and len(argv) >= 3 and argv[2] in JOBS:
         kw = dict(a.split("=", 1) for a in argv[3:])
         kw = {k: int(v) if v.isdigit() else v for k, v in kw.items()}

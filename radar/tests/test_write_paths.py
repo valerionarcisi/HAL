@@ -28,6 +28,9 @@ class FakeTurso:
         self.conn.row_factory = sqlite3.Row
         for ddl in (CONTACTS_DDL, PEOPLE_DDL, *schema.DDL):
             self.conn.execute(ddl)
+        for table, cols in schema.NEW_COLUMNS.items():
+            for name, decl in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
         self.conn.execute("INSERT INTO radar_settings(key, value) VALUES " + ",".join(f"('{k}','{v}')" for k, v in schema.DEFAULT_SETTINGS.items()))
 
     def batch(self, stmts):
