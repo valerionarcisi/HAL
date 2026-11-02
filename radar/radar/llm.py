@@ -19,11 +19,18 @@ class BudgetExceeded(Exception):
     """Tetto giornaliero di chiamate raggiunto: non è un errore del servizio, il lavoro riparte domani."""
 
 
-def _check_budget():
+def _keys(budget):
+    """Il censimento ha il suo tetto (census_llm_daily_calls) e il suo contatore, separati dai lavori automatici."""
+    p = "census_" if budget == "census" else ""
+    return f"{p}llm_daily_calls", f"{p}llm_day", f"{p}llm_calls_today"
+
+
+def _check_budget(budget=True):
+    cap_k, day_k, n_k = _keys(budget)
     row = db.one("""SELECT date('now') AS today,
-                           (SELECT value FROM radar_settings WHERE key = 'llm_daily_calls') AS cap,
-                           (SELECT value FROM radar_settings WHERE key = 'llm_day') AS day,
-                           (SELECT value FROM radar_settings WHERE key = 'llm_calls_today') AS n""")
+                           (SELECT value FROM radar_settings WHERE key = ?) AS cap,
+                           (SELECT value FROM radar_settings WHERE key = ?) AS day,
+                           (SELECT value FROM radar_settings WHERE key = ?) AS n""", cap_k, day_k, n_k)
     n = int(row["n"] or 0) if row["day"] == row["today"] else 0
     cap = int(row["cap"] or 0)
     if cap and n >= cap:
@@ -31,13 +38,15 @@ def _check_budget():
     return row["today"], n
 
 
-def _count_call(today, n):
-    for key, value in (("llm_day", today), ("llm_calls_today", str(n + 1))):
+def _count_call(today, n, budget=True):
+    _, day_k, n_k = _keys(budget)
+    for key, value in ((day_k, today), (n_k, str(n + 1))):
         db.run("INSERT INTO radar_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value)
 
 
 def ask_json(system, user, max_tokens=1200, budget=True):
-    today, n = _check_budget() if budget else (None, 0)
+    """budget: True = tetto dei lavori automatici, "census" = tetto del censimento, False = nessun tetto (conta comunque)."""
+    today, n = _check_budget(budget) if budget else (None, 0)
     body = json.dumps({
         "model": MODEL,
         "max_tokens": max_tokens,
@@ -52,10 +61,11 @@ def ask_json(system, user, max_tokens=1200, budget=True):
     with urllib.request.urlopen(req, timeout=90) as r:
         out = json.load(r)
     if today is None:
-        row = db.one("SELECT date('now') AS today, (SELECT value FROM radar_settings WHERE key = 'llm_day') AS day, "
-                     "(SELECT value FROM radar_settings WHERE key = 'llm_calls_today') AS n")
+        _, day_k, n_k = _keys(budget)
+        row = db.one("SELECT date('now') AS today, (SELECT value FROM radar_settings WHERE key = ?) AS day, "
+                     "(SELECT value FROM radar_settings WHERE key = ?) AS n", day_k, n_k)
         today, n = row["today"], int(row["n"] or 0) if row["day"] == row["today"] else 0
-    _count_call(today, n)
+    _count_call(today, n, budget)
     txt = out["choices"][0]["message"]["content"]
     m = re.search(r"\{.*\}", txt, re.S)
     if not m:

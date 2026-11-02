@@ -59,6 +59,24 @@ def fetch(url, timeout=15):
         return url, "", str(e)[:120]
 
 
+def fetch_bytes(url, timeout=60, limit=5_000_000):
+    """Come fetch ma restituisce i byte (CSV, PDF). Ritorna (byte, errore). Stesse regole: robots.txt e una richiesta ogni 2 secondi per dominio."""
+    try:
+        if not _allowed(url):
+            return b"", "robots.txt vieta"
+        d = domain(url)
+        with _lock:
+            wait = _last_hit.get(d, 0) + PER_DOMAIN_DELAY - time.time()
+            _last_hit[d] = time.time() + max(wait, 0)
+        if wait > 0:
+            time.sleep(wait)
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "it,en;q=0.8"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(limit), None
+    except Exception as e:
+        return b"", str(e)[:120]
+
+
 def text(h):
     h = re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", h)
     return re.sub(r"\s+", " ", htmllib.unescape(re.sub(r"<[^>]+>", " ", h))).strip()

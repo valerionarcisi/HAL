@@ -195,9 +195,18 @@ class TestProfile(Base):
         self.assertEqual((p["first_works"], p["second_works"]), (1, 1))
         self.assertEqual(p["coproduction_countries"], {"FR": 1, "DE": 1})  # il paese della casa non conta
         self.assertEqual(p["funds"], ["Eurimages 2026", "MiC opere prime 2025", "opere seconde"])
+        self.assertEqual(p["funds_eur_total"], 0)
         self.assertEqual(len(p["latest_titles"]), 5)
         self.assertEqual(p["latest_titles"][0]["title"], "A")
         self.assertEqual(json.loads(self.row("SELECT profile_json FROM contacts WHERE id=?", cid)["profile_json"])["credits"], 8)
+
+    def test_profile_groups_funds_by_label_and_sums_the_amounts(self):
+        cid = self.contact("Casa Verde", country="IT")
+        census.add_credit(cid, "A", "producer", "https://s.example", year=2025, funds="MiC Tax Credit 2025 (EUR 1000)")
+        census.add_credit(cid, "B", "producer", "https://s.example", year=2025, funds="MiC Tax Credit 2025 (EUR 2500), Marche 2025")
+        p = census.refresh_profile(cid, this_year=2026)
+        self.assertEqual(p["funds"], ["Marche 2025", "MiC Tax Credit 2025"])
+        self.assertEqual(p["funds_eur_total"], 3500)
 
     def test_profile_without_credits_is_empty_not_an_error(self):
         cid = self.contact("Casa Vuota")

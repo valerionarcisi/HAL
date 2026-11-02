@@ -410,4 +410,19 @@ def inbox(days=7):
 from .report import weekly_report
 from .requests_queue import process_requests
 
-JOBS = {"requests": process_requests, "report": weekly_report, "discover": discover, "enrich_score": enrich_score, "draft": draft, "followup": followup, "send": send, "inbox": inbox}
+def census_dgca(years="", dir=""):
+    from . import census_dgca as dgca
+    return dgca.run(years, dir)
+
+
+def census_distributori():
+    from . import census_it
+    return census_it.run_distributors()
+
+
+def census_marche():
+    from . import census_it
+    return census_it.run_marche()
+
+
+JOBS = {"census:dgca": census_dgca, "census:distributori": census_distributori, "census:marche": census_marche, "requests": process_requests, "report": weekly_report, "discover": discover, "enrich_score": enrich_score, "draft": draft, "followup": followup, "send": send, "inbox": inbox}

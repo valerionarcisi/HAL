@@ -44,6 +44,11 @@ def normalize_name(name):
     return " ".join(core or [w for w in words if w not in LEGAL_FORMS] or words)
 
 
+def normalize_title(title):
+    """Titolo per il confronto: minuscolo, senza accenti né punteggiatura. Non toglie 'film' come fa normalize_name."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", _ascii(title or "").lower()).split())
+
+
 def site_domain(url):
     """Dominio registrabile del sito ufficiale, senza www. None per pagine di elenchi e social."""
     if not url:
@@ -112,10 +117,10 @@ class CompanyIndex:
         d = site_domain(url)
         if d:
             self.by_domain.setdefault(d, cid)
-        for n in (name, company):
-            key = normalize_name(n) if n else ""
-            if len(key) >= 3:
-                self.by_name.setdefault(key, []).append((cid, (country or "").upper()))
+        # Solo il nome: nelle righe di persone (LinkedIn, Instagram) `company` è l'azienda della persona, non la riga stessa.
+        key = normalize_name(name) if name else ""
+        if len(key) >= 3:
+            self.by_name.setdefault(key, []).append((cid, (country or "").upper()))
         v = normalize_vat(vat)
         if v:
             self.by_vat.setdefault(v, cid)
@@ -188,9 +193,9 @@ def add_credit(contact_id, title, role, source_url, year=0, format=None, genres=
     if not source_url or not title:
         raise ValueError("un credito ha bisogno di titolo e fonte")
     year = int(year or 0)
-    key = normalize_name(title)
+    key = normalize_title(title)
     same = [r for r in db.q("SELECT * FROM credits WHERE contact_id=? AND role=?", contact_id, role)
-            if normalize_name(r["title"]) == key and (r["year"] == year or 0 in (r["year"], year))]
+            if normalize_title(r["title"]) == key and (r["year"] == year or 0 in (r["year"], year))]
     if not same:
         db.run("""INSERT INTO credits(contact_id, person_id, title, year, format, genres, role, countries, festivals, funds, source_url)
                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""", contact_id, person_id, title.strip(), year, format, genres, role, countries, festivals, funds, source_url)
@@ -206,7 +211,11 @@ def add_credit(contact_id, title, role, source_url, year=0, format=None, genres=
 # ---------------------------------------------------------------- profilo
 
 FIRST_RE = re.compile(r"opera\s+prima|opere\s+prime|first\s+(feature|film|work)|debut|premier\s+long|primo\s+film", re.I)
+EITHER_RE = re.compile(r"prime\s+(o|e)\s+seconde", re.I)
 SECOND_RE = re.compile(r"opera\s+seconda|opere\s+seconde|second\s+(feature|film|work)|secondo\s+film", re.I)
+
+
+AMOUNT_RE = re.compile(r"\s*\(EUR (\d+)\)")
 
 
 def build_profile(contact, credits, this_year):
@@ -226,10 +235,12 @@ def build_profile(contact, credits, this_year):
         "first_year": years[0] if years else None,
         "last_year": years[-1] if years else None,
         "active_last_3y": bool(years and years[-1] >= this_year - 2),
-        "first_works": sum(1 for c in credits if FIRST_RE.search(text(c))),
-        "second_works": sum(1 for c in credits if SECOND_RE.search(text(c))),
+        "first_works": sum(1 for c in credits if FIRST_RE.search(text(c)) and not EITHER_RE.search(text(c))),
+        "second_works": sum(1 for c in credits if SECOND_RE.search(text(c)) and not EITHER_RE.search(text(c))),
+        "first_or_second_works": sum(1 for c in credits if EITHER_RE.search(text(c))),
         "coproduction_countries": countries,
-        "funds": sorted(set(_flat(c["funds"] for c in credits))),
+        "funds": sorted({AMOUNT_RE.sub("", f).strip() for f in _flat(c["funds"] for c in credits)}),
+        "funds_eur_total": sum(int(m) for f in _flat(c["funds"] for c in credits) for m in AMOUNT_RE.findall(f)),
         "latest_titles": [{"title": c["title"], "year": c["year"] or None, "format": c["format"], "role": c["role"]} for c in latest],
     }
 
