@@ -3020,10 +3020,10 @@ def _confidence_description(release, target_code):
     if score == 500:
         return f"⚠️ Audio {target_label}: rilascio DUAL generico, potrebbe contenerlo"
     if score == 400:
-        return f"❓ Audio {target_label}: MULTI con altre lingue dichiarate, possibile su traccia non disclosed"
+        return f"❓ Audio {target_label}: forse, su una traccia non dichiarata (rilascio multilingua)"
     if score == 200:
-        return f"❓ Audio {target_label}: DUAL con altra lingua già dichiarata, bassa probabilità"
-    return f"❓ Audio {target_label}: probabilità incerta (score {score})"
+        return f"❓ Audio {target_label}: poco probabile (doppia lingua, l'altra è già dichiarata)"
+    return f"❓ Audio {target_label}: non sono sicuro che ci sia"
 
 
 def _picker_confidence_legend(releases, target_code, include_refuted=None):
@@ -3655,6 +3655,12 @@ def usd_to_eur(usd_amount):
     return usd_amount * USD_TO_EUR_RATE
 
 
+def eur_text(usd):
+    """Spend shown to the user: '0,12 €', or 'meno di 1 centesimo' for the tiny per-film amounts."""
+    eur = usd_to_eur(usd)
+    return "meno di 1 centesimo" if eur < 0.01 else f"{eur:.2f} €".replace(".", ",")
+
+
 def _model_price_per_million(model_name):
     """(input, output) USD price per million tokens for known OpenRouter
     model ids used here. Falls back to the Haiku-4.5 price (the current
@@ -3889,9 +3895,9 @@ def translate_srt_with_claude(srt_content, video_name, progress_msg_id=None):
         if progress_msg_id and (batch_num % 2 == 1 or batch_num == total_batches):
             bar = _progress_bar(batch_num - 1, total_batches)
             tg_edit_message(progress_msg_id,
-                f"🤖 <b>Traducendo EN→IT...</b>\n\n"
+                f"🤖 <b>Traduco dall'inglese all'italiano…</b>\n\n"
                 f"{bar}\n"
-                f"📊 Blocco {batch_num}/{total_batches}\n"
+                f"📊 Parte {batch_num} di {total_batches}\n"
                 f"<i>{html.escape(video_name)}</i>")
 
         res = _claude_translate_bisect(indexed, video_name)
@@ -4220,16 +4226,16 @@ def _notify_deepl_fallback_once():
     _deepl_fallback_message_sent = True
 
     if _deepl_quota_notified:
-        reset_note = f"\n📅 Quota DeepL si resetta il {DEEPL_QUOTA_RESET_DAY} del mese." if DEEPL_QUOTA_RESET_DAY else ""
+        reset_note = f"\nTorna gratis il {DEEPL_QUOTA_RESET_DAY} del mese." if DEEPL_QUOTA_RESET_DAY else ""
         tg_send(
-            f"⚠️ <b>Quota DeepL esaurita</b> — uso il fallback {CLAUDE_MODEL} per le traduzioni "
-            f"(a pagamento, costo minimo)."
+            f"⚠️ <b>DeepL ha finito la quota gratuita</b>: traduco con l'AI di riserva, "
+            f"che costa qualche centesimo a film."
             f"{reset_note}"
         )
     else:
         tg_send(
-            f"⚠️ <b>DeepL non raggiungibile</b> — uso il fallback {CLAUDE_MODEL} per le traduzioni. "
-            f"Controlla i log con /log se persiste."
+            f"⚠️ <b>DeepL non risponde</b>: intanto traduco con l'AI di riserva (qualche centesimo a film). "
+            f"Se domani è ancora così, dimmelo."
         )
 
 
@@ -4413,10 +4419,8 @@ def _notify_radarr_request_ready(video_path):
             {"text": "🔁 Ri-richiedi", "callback_data": f"lang_redo:{tmdb_id}"},
         ]]}
         tg_send(
-            f"⚠️ <b>{title_label}</b> — atteso audio {flag} <b>{required_lang}</b> "
-            f"ma il file non lo contiene.\n"
-            f"📁 {os.path.basename(video_path)}\n\n"
-            f"Vuoi tenerlo lo stesso o ri-richiedere un altro rilascio?",
+            f"⚠️ <b>{title_label}</b> è scaricato, ma non ha l'audio {flag} <b>{required_lang}</b> che avevi chiesto.\n\n"
+            f"Lo tieni così o ne cerco un altro?",
             reply_markup=keyboard,
         )
         return
@@ -4426,10 +4430,8 @@ def _notify_radarr_request_ready(video_path):
     save_requests(requests_state)
     lang_line = _format_lang_filter_line(required_lang, entry.get("lang_source"))
     tg_send(
-        f"📬 <b>Pronto:</b> {title_label}\n"
-        f"📁 {os.path.basename(video_path)}\n"
+        f"📬 <b>Pronto da vedere:</b> {title_label}\n"
         f"{lang_line}"
-        f"📡 Era stato richiesto via /scarica ({entry.get('indexer', '?')})."
     )
 
 
@@ -4529,9 +4531,8 @@ def _translate_and_save_inner(eng_content, video_path, state, silent=False, skip
         # DeepL, then the Claude/OpenRouter path — has failed. Silent here
         # would mean the user just never gets a .it.srt with no explanation.
         tg_send(
-            f"❌ Traduzione fallita per <b>{friendly_name(video_path)}</b>\n"
-            f"Sia DeepL che il fallback AI non hanno prodotto un risultato. "
-            f"Controlla i log con /log o riprova più tardi."
+            f"❌ Non sono riuscito a tradurre i sottotitoli di <b>{friendly_name(video_path)}</b>.\n"
+            f"Riprova più tardi con /traduci e il titolo. Nessun costo addebitato per questo tentativo."
         )
         return False
 
@@ -4583,32 +4584,24 @@ def _translate_and_save_inner(eng_content, video_path, state, silent=False, skip
     # the user; they'd just notice the film looks off mid-viewing.
     if not quality_ok:
         tg_send(
-            f"⚠️ Sub ITA tradotto ma sospetto ({quality_reason}):\n"
-            f"<b>{friendly_name(video_path)}</b>\n"
-            f"📁 {os.path.basename(sub_path)}\n"
-            f"Controlla il file, la traduzione potrebbe essere incompleta o errata."
+            f"⚠️ Sottotitoli italiani tradotti, ma forse incompleti: <b>{friendly_name(video_path)}</b>\n"
+            f"Motivo: {quality_reason}.\n"
+            f"Prima di vederlo scorrili un attimo; se non vanno, /ritraduci e il titolo."
         )
     elif sync_score_low:
         tg_send(
-            f"⚠️ Sub ITA tradotto ma sync incerto (score {sync_result.get('score', 0):.0f} < {SYNC_MIN_SCORE}):\n"
-            f"<b>{friendly_name(video_path)}</b>\n"
-            f"📁 {os.path.basename(sub_path)}\n"
-            f"Il sync automatico non ha raggiunto una buona confidenza — verifica manualmente."
+            f"⚠️ Sottotitoli italiani tradotti, ma i tempi potrebbero non combaciare: <b>{friendly_name(video_path)}</b>\n"
+            f"Guardane un minuto prima della visione; se sono sfasati, /sincronizza e il titolo."
         )
     elif sync_totally_failed:
         tg_send(
-            f"⚠️ Sub ITA tradotto ma il sync automatico non ha funzionato (nessun output):\n"
-            f"<b>{friendly_name(video_path)}</b>\n"
-            f"📁 {os.path.basename(sub_path)}\n"
-            f"Timecode rimasti quelli originali ENG — probabile audio non utilizzabile, verifica manualmente."
+            f"⚠️ Sottotitoli italiani tradotti, ma non sono riuscito ad allinearli all'audio: <b>{friendly_name(video_path)}</b>\n"
+            f"Hanno i tempi di quelli inglesi: di solito vanno bene, ma guardane un minuto prima della visione."
         )
     elif not silent:
         tg_send(
-            f"🤖 Sub ITA tradotto da ENG ({engine}):\n"
-            f"<b>{friendly_name(video_path)}</b>\n"
-            f"📁 {os.path.basename(sub_path)}\n"
-            f"💰 Totale speso: €{usd_to_eur(total_spent):.4f}"
-            + (f" | DeepL: {deepl_chars:,} char" if deepl_chars else "")
+            f"✅ Sottotitoli italiani pronti (tradotti dall'inglese): <b>{friendly_name(video_path)}</b>\n"
+            f"💰 Spesa per le traduzioni finora: {eur_text(total_spent)}"
         )
     return True
 
@@ -4663,7 +4656,7 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
                 shutil.copy2(existing["path"], sub_path)
             _save_sub_and_update_state(video_path, sub_path, f"existing file: {os.path.basename(existing['path'])}", state)
             if not silent:
-                tg_send(f"✅ Sub ITA trovato nella cartella:\n<b>{friendly_name(video_path)}</b>")
+                tg_send(f"✅ Sottotitoli italiani pronti (erano già nella cartella): <b>{friendly_name(video_path)}</b>")
             return True, "file esistente"
         elif existing["lang"] == "en":
             en_srt_path = os.path.splitext(video_path)[0] + ".en.srt"
@@ -4718,10 +4711,8 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
     if ita_saved:
         log.info(f"  ✅ ITA saved" + (" + ENG saved" if eng_saved else ""))
         if not silent:
-            files = f"📁 {os.path.basename(sub_path)}"
-            if eng_saved:
-                files += f"\n📁 {os.path.basename(en_srt_path)}"
-            tg_send(f"✅ Sub ITA scaricato ({ita_saved}):\n<b>{friendly_name(video_path)}</b>\n{files}")
+            extra = " Ci sono anche quelli inglesi." if eng_saved else ""
+            tg_send(f"✅ Sottotitoli italiani pronti: <b>{friendly_name(video_path)}</b>.{extra}")
         return True, ita_saved
 
     # No ITA — fall through to ENG-only path
@@ -4730,11 +4721,8 @@ def do_download(video_path, state, silent=False, translate=True, trace=None):
         state["asked"][video_path] = {"time": datetime.now().isoformat(), "status": "failed"}
         save_state(state)
         if not silent:
-            trace_text = format_search_trace(trace)
-            msg = f"❌ Nessun sub ITA né ENG trovato per:\n<b>{friendly_name(video_path)}</b>"
-            if trace_text:
-                msg += f"\n\n<b>Tentativi:</b>\n{trace_text}"
-            tg_send(msg)
+            tg_send(f"❌ Nessun sottotitolo, né italiano né inglese, per <b>{friendly_name(video_path)}</b>.\n"
+                    f"Lo trovi in /falliti, con il tasto per riprovare.")
         return False, None
 
     # Only ENG was saved — caller decides about translation
@@ -4901,11 +4889,8 @@ def ask_user(video_path, state):
     }
 
     result = tg_send(
-        f"🎬 <b>Sub ITA mancante</b>\n\n"
-        f"📺 {name}\n"
-        f"📁 {folder}\n"
-        f"📄 {os.path.basename(video_path)}\n\n"
-        f"Scarico il sottotitolo italiano?",
+        f"🎬 <b>{name}</b> non ha i sottotitoli italiani.\n\n"
+        f"Li cerco?",
         reply_markup=keyboard,
     )
 
@@ -4957,10 +4942,9 @@ def _send_batch_message(folder, paths, state):
     }
 
     result = tg_send(
-        f"🎬 <b>Sub ITA mancanti</b>\n\n"
-        f"📁 <b>{folder}</b> — {len(paths)} file\n\n"
+        f"🎬 <b>{folder}</b>: {len(paths)} file senza sottotitoli italiani\n\n"
         f"{episode_list}\n\n"
-        f"Scarico i sottotitoli italiani?",
+        f"Li cerco?",
         reply_markup=keyboard,
     )
 
@@ -6387,7 +6371,7 @@ def _cmd_costi(arg, state, excludes):
 
     total_paid = pol_cost + son_cost
 
-    sections = [f"💰 <b>Costi traduzione</b>"]
+    sections = [f"💰 <b>Quanto hai speso per le traduzioni: {eur_text(total_paid)}</b>"]
 
     sections.append(
         f"\n🌐 <b>DeepL</b> (primario)\n"
@@ -6397,20 +6381,20 @@ def _cmd_costi(arg, state, excludes):
     )
 
     sections.append(
-        f"\n✨ <b>Polish</b> ({CLAUDE_POLISH_MODEL})\n"
+        f"\n✨ <b>Rifinitura con l'AI</b> (dopo DeepL)\n"
         f"  Token: {pol_in:,} in + {pol_out:,} out\n"
         f"  Polish eseguiti: {pol_runs}\n"
         f"  Costo: €{usd_to_eur(pol_cost):.4f}"
     )
 
     sections.append(
-        f"\n🤖 <b>Fallback</b> ({CLAUDE_MODEL})\n"
+        f"\n🤖 <b>AI di riserva</b> (quando DeepL non c'è)\n"
         f"  Token: {son_in:,} in + {son_out:,} out\n"
         f"  Traduzioni: {son_runs}\n"
         f"  Costo: €{usd_to_eur(son_cost):.4f}"
     )
 
-    sections.append(f"\n📈 <b>Totale fallback a pagamento: €{usd_to_eur(total_paid):.4f}</b>")
+    sections.append(f"\n📈 <b>Totale speso: {eur_text(total_paid)}</b> (DeepL è gratis)")
     tg_send("\n".join(sections))
 
 
@@ -7132,8 +7116,8 @@ def _handle_forwarded_post(msg):
 
 
 _HOUSE_ERROR_TEXT = {
-    "not_configured": "⚙️ Il motore dei contatti non è collegato a HAL (mancano TURSO_DATABASE_URL e TURSO_AUTH_TOKEN).",
-    "unauthorized": "🔑 Il database dei contatti ha rifiutato il token di HAL (TURSO_AUTH_TOKEN errato).",
+    "not_configured": "⚙️ Il radar dei contatti non è collegato a HAL: va configurato il collegamento al database (TURSO_DATABASE_URL e TURSO_AUTH_TOKEN).",
+    "unauthorized": "🔑 Il database dei contatti non accetta più la chiave di HAL: va rinnovata (TURSO_AUTH_TOKEN).",
     "timeout": "⏱️ Il database dei contatti non risponde. Riprova tra poco.",
     "unavailable": "⚠️ Non riesco ad accodare la richiesta al motore dei contatti. Riprova più tardi.",
 }
@@ -7994,7 +7978,7 @@ def process_callbacks(state, excludes):
                     tg_answer_callback(cb_id, "🤖 Traduzione avviata...")
                     if msg_id:
                         tg_edit_message(msg_id,
-                            f"🤖 <b>Traducendo EN→IT...</b>\n\n"
+                            f"🤖 <b>Traduco dall'inglese all'italiano…</b>\n\n"
                             f"[░░░░░░░░░░] 0%\n"
                             f"📊 0/{len(batch['paths'])}")
                     download_queue.put({"type": "translate", "paths": batch["paths"], "msg_id": msg_id})
@@ -8361,10 +8345,8 @@ def search_and_offer(query, state):
         }
 
         result = tg_send(
-            f"🎬 <b>Sub ITA mancante</b>\n\n"
-            f"📄 {friendly_name(video_path)}\n"
-            f"📁 {os.path.basename(video_path)}\n\n"
-            f"Scarico il sottotitolo italiano?",
+            f"🎬 <b>{friendly_name(video_path)}</b> non ha i sottotitoli italiani.\n\n"
+            f"Li cerco?",
             reply_markup=keyboard,
         )
 
@@ -8638,10 +8620,10 @@ def do_translate_prep(query, state, progress_msg_id=None):
         eligible.append((video_path, en_srt))
 
     if not eligible:
-        summary = f"📊 <b>Translate prep '{query}'</b>\n\n"
-        summary += f"🇮🇹 Già con sub ITA: {len(already_it)}\n"
-        summary += f"🇬🇧 Senza .en.srt: {len(no_en)}\n\n"
-        summary += "Niente da tradurre. Usa prima la ricerca per scaricare il sub EN."
+        summary = f"🤖 <b>«{query}»: niente da tradurre</b>\n\n"
+        summary += f"• Già in italiano: {len(already_it)}\n"
+        summary += f"• Senza sottotitoli inglesi: {len(no_en)}\n\n"
+        summary += "Per tradurre servono prima quelli inglesi: /subeng e il titolo."
         if progress_msg_id:
             tg_edit_message(progress_msg_id, summary)
         else:
@@ -8657,7 +8639,7 @@ def do_translate_prep(query, state, progress_msg_id=None):
             bar = _progress_bar(i, total)
             tg_edit_message(
                 progress_msg_id,
-                f"🔄 <b>Sync EN su audio...</b>\n\n{bar}\n📊 {i}/{total} sincronizzati\n\n"
+                f"🔄 <b>Allineo all'audio i sottotitoli inglesi…</b>\n\n{bar}\n📊 {i} di {total}\n\n"
                 f"<i>{friendly_name(video_path)}</i>",
             )
         try:
@@ -8677,20 +8659,16 @@ def do_translate_prep(query, state, progress_msg_id=None):
     en_paths = [vp for vp, _ in eligible]
     total_cost, total_blocks = _estimate_batch_translation_cost(en_paths)
 
-    summary = f"📊 <b>Translate prep '{query}'</b>\n\n"
-    summary += f"🔄 Sincronizzati: {synced}/{total}\n"
-    if uncertain_sync:
-        names = ", ".join(f"{friendly_name(vp)} (score {sc:.0f})" for vp, sc in uncertain_sync[:5])
-        summary += f"⚠️ Sync incerto (< {SYNC_MIN_SCORE}): {names}\n"
-    if no_sync_output:
-        names = ", ".join(friendly_name(vp) for vp in no_sync_output[:5])
-        summary += f"⚠️ Sync non riuscito (audio non utilizzabile?): {names}\n"
+    summary = f"🤖 <b>Traduzione di «{query}»: pronta a partire</b>\n\n"
+    summary += f"💰 <b>Costo stimato: €{usd_to_eur(total_cost):.2f}</b> — {_translation_engine_label()}\n\n"
+    summary += f"• Da tradurre: {len(en_paths)}\n"
     if already_it:
-        summary += f"🇮🇹 Già con sub ITA (saltati): {len(already_it)}\n"
+        summary += f"• Già in italiano, salto: {len(already_it)}\n"
     if no_en:
-        summary += f"🇬🇧 Senza .en.srt (saltati): {len(no_en)}\n"
-    engine = _translation_engine_label()
-    summary += f"\n💰 <b>Costo traduzione stimato: €{usd_to_eur(total_cost):.2f}</b> ({total_blocks} blocchi)\n⚙️ Motore: {engine}"
+        summary += f"• Senza sottotitoli inglesi, salto: {len(no_en)}\n"
+    if uncertain_sync or no_sync_output:
+        names = ", ".join(friendly_name(vp) for vp in ([vp for vp, _ in uncertain_sync] + no_sync_output)[:5])
+        summary += f"• Tempi forse sfasati (dopo, controlla un minuto): {names}\n"
 
     translate_hash = str(abs(hash(tuple(en_paths))))[:8]
     batches = load_batches()
@@ -8780,10 +8758,7 @@ def do_download_english(query, state, progress_msg_id=None, paths=None):
     if failed_names and len(failed_names) <= 10:
         summary += "\n\n<b>Non trovati:</b>\n" + "\n".join(
             f"  ❌ {html.escape(n)}" for n in failed_names)
-        summary += "\n<i>I sub precedenti, se c'erano, sono stati mantenuti.</i>"
-    trace_text = format_search_trace(trace)
-    if failed and trace_text:
-        summary += f"\n\n<b>Tentativi:</b>\n{trace_text}"
+        summary += "\n<i>Dove c'erano già sottotitoli, li ho lasciati.</i>"
 
     _notify(progress_msg_id, summary)
 
@@ -8830,14 +8805,14 @@ def _translation_engine_label():
     shown in the Traduci button prompt so the user knows what they're paying
     for (or not) before confirming."""
     if not DEEPL_API_KEY:
-        return f"🤖 {CLAUDE_MODEL} (DeepL non configurato, a pagamento)"
+        return "con l'AI, a pagamento (DeepL non è configurato)"
     quota_ok = deepl_has_quota()
     if quota_ok is True:
-        return "🆓 DeepL (gratuito)"
+        return "con DeepL, gratis"
     if quota_ok is False:
-        reset_note = f", si resetta il {DEEPL_QUOTA_RESET_DAY} del mese" if DEEPL_QUOTA_RESET_DAY else ""
-        return f"🤖 {CLAUDE_MODEL} (quota DeepL esaurita{reset_note}, a pagamento)"
-    return f"🤖 {CLAUDE_MODEL} (impossibile verificare quota DeepL, a pagamento)"
+        reset_note = f"; torna gratis il {DEEPL_QUOTA_RESET_DAY} del mese" if DEEPL_QUOTA_RESET_DAY else ""
+        return f"con l'AI, a pagamento (DeepL ha finito la quota gratuita{reset_note})"
+    return "con l'AI, a pagamento (non riesco a controllare la quota di DeepL)"
 
 
 def _estimate_batch_translation_cost(paths):
@@ -8883,9 +8858,9 @@ def do_batch_translate(paths, state, progress_msg_id=None):
         if progress_msg_id and (i % 2 == 0 or i == total - 1):
             bar = _progress_bar(i, total)
             tg_edit_message(progress_msg_id,
-                f"🤖 <b>Traducendo EN→IT...</b>\n\n"
+                f"🤖 <b>Traduco dall'inglese all'italiano…</b>\n\n"
                 f"{bar}\n"
-                f"📊 {i}/{total} — ✅ {success} | ❌ {failed}")
+                f"📊 {i} di {total} — ✅ {success} | ❌ {failed}")
 
         if _translate_and_save(en_srt, video_path, state, silent=True, skip_sync=True, progress_msg_id=progress_msg_id):
             success += 1
@@ -8900,13 +8875,13 @@ def do_batch_translate(paths, state, progress_msg_id=None):
     total_spent = costs.get("total_cost_usd", 0.0)
 
     summary = f"🤖 <b>Traduzione completata</b>\n\n"
-    summary += f"✅ Tradotti: {success}/{total}\n❌ Falliti: {failed}/{total}\n"
-    summary += f"💰 Costo totale sessione: €{usd_to_eur(total_spent):.4f}"
+    summary += f"✅ Tradotti: {success} di {total}\n" + (f"❌ Non riusciti: {failed} (riprova con /traduci e il titolo)\n" if failed else "")
+    summary += f"💰 Spesa per le traduzioni finora: {eur_text(total_spent)}"
 
     if success_names and len(success_names) <= 10:
         summary += "\n\n<b>Tradotti:</b>\n" + "\n".join(f"  ✅ {n}" for n in success_names)
     if failed_names and len(failed_names) <= 10:
-        summary += "\n\n<b>Falliti:</b>\n" + "\n".join(f"  ❌ {n}" for n in failed_names)
+        summary += "\n\n<b>Non riusciti:</b>\n" + "\n".join(f"  ❌ {n}" for n in failed_names)
 
     if progress_msg_id:
         tg_edit_message(progress_msg_id, summary)
@@ -9049,15 +9024,12 @@ def _process_queue_job(job, state):
                 ]
             ]}
             tg_edit_message(msg_id,
-                f"🇬🇧 Sub ENG trovato per:\n<b>{name}</b>\n\n"
-                f"💰 Tradurre in italiano? Costo: <b>€{usd_to_eur(cost):.2f}</b> ({blocks} blocchi)\n⚙️ Motore: {engine}",
+                f"🇬🇧 <b>{name}</b>: ci sono solo i sottotitoli inglesi.\n\n"
+                f"Li traduco in italiano? 💰 <b>Costo: €{usd_to_eur(cost):.2f}</b> — {engine}",
                 reply_markup=keyboard)
         elif not result and msg_id:
-            trace_text = format_search_trace(trace)
-            fail_msg = f"❌ Nessun sub ITA né ENG trovato per:\n<b>{name}</b>\nRiproverò tra 24h."
-            if trace_text:
-                fail_msg += f"\n\n<b>Tentativi:</b>\n{trace_text}"
-            tg_edit_message(msg_id, fail_msg)
+            tg_edit_message(msg_id, f"❌ Nessun sottotitolo, né italiano né inglese, per <b>{name}</b>.\n"
+                                    f"Riprovo da solo tra 24 ore.")
 
 
 def _queue_worker(state_ref):

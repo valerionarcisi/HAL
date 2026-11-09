@@ -723,7 +723,7 @@ class TestTranslatePrep(unittest.TestCase):
                  patch.object(hal, "has_italian_sub", return_value=False), \
                  patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a)):
                 hal.do_translate_prep("film", state={}, progress_msg_id=None)
-            self.assertTrue(any("Senza .en.srt" in str(a) for a in sent))
+            self.assertTrue(any("Senza sottotitoli inglesi" in str(a) for a in sent))
         finally:
             shutil.rmtree(tmp)
 
@@ -1287,8 +1287,8 @@ class TestQueueWorkerSingleJobNoDuplicateMessages(unittest.TestCase):
         sends = [s for s in sent if s[0] == "send"]
         self.assertEqual(len(edits), 1)
         self.assertEqual(len(sends), 0)
-        self.assertIn("Nessun sub ITA né ENG", str(edits[0]))
-        self.assertIn("Riproverò tra 24h", str(edits[0]))
+        self.assertIn("Nessun sottotitolo, né italiano né inglese", str(edits[0]))
+        self.assertIn("Riprovo da solo tra 24 ore", str(edits[0]))
 
 
 class TestValidateSync(unittest.TestCase):
@@ -2064,24 +2064,24 @@ class TestTranslationEngineLabel(unittest.TestCase):
         from unittest.mock import patch
         hal.DEEPL_API_KEY = ""
         label = hal._translation_engine_label()
-        self.assertIn("claude-haiku-4.5", label)
+        self.assertNotIn("claude-haiku-4.5", label)  # no model ids in user-facing text
         self.assertIn("a pagamento", label)
+        self.assertIn("DeepL non è configurato", label)
 
     def test_deepl_with_quota_is_free(self):
         from unittest.mock import patch
         hal.DEEPL_API_KEY = "test-key"
         with patch.object(hal, "deepl_has_quota", return_value=True):
             label = hal._translation_engine_label()
-        self.assertIn("DeepL", label)
-        self.assertIn("gratuito", label)
+        self.assertEqual(label, "con DeepL, gratis")
 
     def test_deepl_quota_exhausted_shows_reset_day_and_fallback_model(self):
         from unittest.mock import patch
         hal.DEEPL_API_KEY = "test-key"
         with patch.object(hal, "deepl_has_quota", return_value=False):
             label = hal._translation_engine_label()
-        self.assertIn("claude-haiku-4.5", label)
-        self.assertIn("13", label)
+        self.assertNotIn("claude-haiku-4.5", label)
+        self.assertIn("torna gratis il 13 del mese", label)
         self.assertIn("a pagamento", label)
 
     def test_quota_check_failure_still_names_paid_fallback(self):
@@ -2089,7 +2089,7 @@ class TestTranslationEngineLabel(unittest.TestCase):
         hal.DEEPL_API_KEY = "test-key"
         with patch.object(hal, "deepl_has_quota", return_value=None):
             label = hal._translation_engine_label()
-        self.assertIn("claude-haiku-4.5", label)
+        self.assertNotIn("claude-haiku-4.5", label)
         self.assertIn("a pagamento", label)
 
 
@@ -2130,8 +2130,8 @@ class TestDeeplFallbackNotification(unittest.TestCase):
         self.assertEqual(result, "translated")
         self.assertEqual(len(sent), 1)
         joined = str(sent[0])
-        self.assertIn("Quota DeepL esaurita", joined)
-        self.assertIn("resetta", joined)
+        self.assertIn("DeepL ha finito la quota gratuita", joined)
+        self.assertIn("Torna gratis il", joined)
 
     def test_transient_error_message_has_no_reset_claim(self):
         from unittest.mock import patch
@@ -2146,8 +2146,8 @@ class TestDeeplFallbackNotification(unittest.TestCase):
             hal.translate_srt(self._srt(), "Test Movie")
 
         joined = str(sent[0])
-        self.assertIn("non raggiungibile", joined)
-        self.assertNotIn("resetta", joined)
+        self.assertIn("DeepL non risponde", joined)
+        self.assertNotIn("Torna gratis", joined)
 
     def test_fallback_notice_sent_only_once_per_run(self):
         from unittest.mock import patch
@@ -2436,8 +2436,8 @@ class TestTranslateProgressUpdates(unittest.TestCase):
         self.assertGreaterEqual(len(edits), 2)
         self.assertTrue(any(e[0] == 999 for e in edits))
         joined = str(edits)
-        self.assertIn("Blocco 1/3", joined)
-        self.assertIn("Blocco 3/3", joined)
+        self.assertIn("Parte 1 di 3", joined)
+        self.assertIn("Parte 3 di 3", joined)
 
     def test_no_progress_msg_id_sends_nothing(self):
         from unittest.mock import patch
@@ -3174,7 +3174,7 @@ class TestConfidenceDescription(unittest.TestCase):
         hal._AUDIO_SCRAPE_CACHE[rel["infoHash"]] = None
         desc = hal._confidence_description(rel, "ITA")
         self.assertIn("❓", desc)
-        self.assertIn("DUAL", desc)
+        self.assertIn("poco probabile", desc)
 
 
 class TestPickerLegend(unittest.TestCase):
@@ -6651,7 +6651,7 @@ class TestIntegrationTraduci(IntegrationTestBase):
             hal.dispatch_command("/traduci amelie", self.state, set())
             self._drain_queue()  # runs translate_prep: sync + cost/engine prompt
 
-            self.assertIn("Costo traduzione stimato", self._sent_text())
+            self.assertIn("Costo stimato: €", self._sent_text())
             self.assertIn("batch_translate", self._sent_text())
             self.assertFalse(os.path.exists(it_sub))
 
@@ -6699,8 +6699,8 @@ class TestIntegrationTraduci(IntegrationTestBase):
             hal.dispatch_command("/traduci amelie", self.state, set())
             self._drain_queue()  # runs do_translate_prep, including the sync
 
-        self.assertIn("Sync incerto", self._sent_text())
-        self.assertIn("200", self._sent_text())
+        self.assertIn("Tempi forse sfasati", self._sent_text())
+        self.assertNotIn("score", self._sent_text())  # the number is ours to judge, not his
         # Still offers to translate — a low sync score doesn't block the
         # confirm prompt, it's surfaced as information for the user to weigh.
         self.assertIn("batch_translate", self._sent_text())
@@ -6719,7 +6719,7 @@ class TestIntegrationTraduci(IntegrationTestBase):
             hal.dispatch_command("/traduci amelie", self.state, set())
             self._drain_queue()
 
-        self.assertIn("Sync non riuscito", self._sent_text())
+        self.assertIn("Tempi forse sfasati", self._sent_text())
 
     def test_both_fallbacks_failing_notifies_explicitly(self):
         """If translate_srt() returns None (every fallback it tried — DeepL,
@@ -6740,7 +6740,7 @@ class TestIntegrationTraduci(IntegrationTestBase):
             self._drain_queue()
 
         self.assertFalse(os.path.exists(it_sub))
-        self.assertIn("Traduzione fallita", self._sent_text())
+        self.assertIn("Non sono riuscito a tradurre", self._sent_text())
 
     def test_duplicate_translation_job_for_same_video_is_skipped(self):
         """Real risk found reviewing the queue: nothing stopped two queued
