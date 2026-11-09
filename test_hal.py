@@ -4233,6 +4233,113 @@ class TestEnqueueHouseRequest(unittest.TestCase):
         self.assertEqual((ok, err), (False, "unavailable"))
 
 
+class TestForwardedPost(unittest.TestCase):
+    POST = {"chat": {"id": 0}, "forward_origin": {"type": "channel"}, "text": "Open call Rossa Residency, entro 20 novembre https://rossa.example/r",
+            "entities": [{"type": "text_link", "offset": 0, "length": 4, "url": "https://nascosto.example/apply"}]}
+
+    def test_hidden_and_plain_links_are_collected(self):
+        text, urls = hal._forwarded_post(self.POST)
+        self.assertIn("Rossa Residency", text)
+        self.assertEqual(urls, ["https://nascosto.example/apply", "https://rossa.example/r"])
+
+    def test_plain_message_is_not_a_forward(self):
+        self.assertIsNone(hal._forwarded_post({"chat": {"id": 0}, "text": "interstellar"}))
+
+    def test_caption_of_a_forwarded_photo_counts(self):
+        self.assertEqual(hal._forwarded_post({"forward_date": 1, "caption": "Bando corti"}), ("Bando corti", []))
+
+    def test_queued_and_confirmed(self):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])), \
+             patch.object(hal, "enqueue_opportunity_request", return_value=(True, None)) as enq:
+            self.assertTrue(hal._handle_forwarded_post(self.POST))
+        enq.assert_called_once()
+        self.assertIn("Opportunità", sent[0])
+
+    def test_other_chats_and_plain_messages_are_left_alone(self):
+        with patch.object(hal, "enqueue_opportunity_request") as enq:
+            self.assertFalse(hal._handle_forwarded_post({**self.POST, "chat": {"id": 99}}))
+            self.assertFalse(hal._handle_forwarded_post({"chat": {"id": 0}, "text": "interstellar"}))
+        enq.assert_not_called()
+
+    def test_queue_failure_is_reported(self):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])), \
+             patch.object(hal, "enqueue_opportunity_request", return_value=(False, "timeout")):
+            self.assertTrue(hal._handle_forwarded_post(self.POST))
+        self.assertIn("non risponde", sent[0])
+
+
+class TestBandiPropostaCommands(unittest.TestCase):
+    def _run(self, handler, arg, result=(True, None)):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])), \
+             patch.object(hal, "enqueue_radar_request", return_value=result) as enq:
+            handler(arg, {}, [])
+        return sent, enq
+
+    def test_bandi_queues_calendar(self):
+        sent, enq = self._run(hal._cmd_bandi, "")
+        enq.assert_called_once_with("calls_calendar")
+        self.assertIn("bandi", sent[0])
+
+    def test_proposta_needs_a_number(self):
+        sent, enq = self._run(hal._cmd_proposta, "piemonte")
+        enq.assert_not_called()
+        self.assertIn("/proposta 3", sent[0])
+
+    def test_proposta_read_and_drafts(self):
+        _, enq = self._run(hal._cmd_proposta, "7")
+        enq.assert_called_once_with("call_proposal", "7")
+        sent, enq = self._run(hal._cmd_proposta, "7 bozze")
+        enq.assert_called_once_with("call_proposal", "7 bozze")
+        self.assertIn("approvare", sent[0])
+
+    def test_database_error_is_reported(self):
+        sent, _ = self._run(hal._cmd_bandi, "", (False, "timeout"))
+        self.assertEqual(sent[0], hal._HOUSE_ERROR_TEXT["timeout"])
+
+    def test_listed_in_help(self):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])):
+            hal._cmd_aiuto("", {}, [])
+        self.assertTrue(any("/bandi" in s and "/proposta" in s for s in sent))
+
+
+class TestRegioneCommand(unittest.TestCase):
+    def _run(self, arg, enqueue_result=(True, None)):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])), \
+             patch.object(hal, "enqueue_region_request", return_value=enqueue_result) as enq:
+            hal._cmd_regione(arg, {}, [])
+        return sent, enq
+
+    def test_usage_without_argument(self):
+        sent, enq = self._run("  ")
+        enq.assert_not_called()
+        self.assertIn("/regione", sent[0])
+
+    def test_queues_and_confirms(self):
+        sent, enq = self._run("friuli venezia giulia")
+        enq.assert_called_once_with("friuli venezia giulia")
+        self.assertIn("friuli venezia giulia", sent[0])
+
+    def test_database_error_is_reported(self):
+        sent, _ = self._run("toscana", (False, "timeout"))
+        self.assertEqual(sent[0], hal._HOUSE_ERROR_TEXT["timeout"])
+
+    def test_not_configured_does_not_call_turso(self):
+        with patch.object(hal, "TURSO_DATABASE_URL", ""), patch.object(hal, "turso_execute") as ex:
+            self.assertEqual(hal.enqueue_region_request("toscana"), (False, "not_configured"))
+        ex.assert_not_called()
+
+    def test_listed_in_help(self):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])):
+            hal._cmd_aiuto("", {}, [])
+        self.assertTrue(any("/regione" in s for s in sent))
+
+
 class TestCasaCommand(unittest.TestCase):
     def test_registry_and_aliases(self):
         for form in ["/casa", "/house", "/company"]:

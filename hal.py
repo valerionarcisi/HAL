@@ -7082,6 +7082,55 @@ def enqueue_house_request(url, project):
         "INSERT INTO radar_requests(kind, project, url) VALUES('add_house', ?, ?)", [project, url])
 
 
+def enqueue_opportunity_request(text, urls):
+    """Queue an 'opportunity' request: the engine extracts and then watches the call (deadline, dead link, changes)."""
+    if not (TURSO_DATABASE_URL and TURSO_AUTH_TOKEN):
+        return False, "not_configured"
+    return turso_execute(
+        "INSERT INTO radar_requests(kind, payload) VALUES('opportunity', ?)",
+        [json.dumps({"text": text, "urls": urls}, ensure_ascii=False)])
+
+
+def enqueue_region_request(region):
+    """Queue a 'region' request: the engine replies in the chat with the houses it knows in that region."""
+    if not (TURSO_DATABASE_URL and TURSO_AUTH_TOKEN):
+        return False, "not_configured"
+    return turso_execute("INSERT INTO radar_requests(kind, payload) VALUES('region', ?)", [region])
+
+
+def enqueue_radar_request(kind, payload=None):
+    """Queue a request for the radar engine with an optional text payload (it replies in the chat)."""
+    if not (TURSO_DATABASE_URL and TURSO_AUTH_TOKEN):
+        return False, "not_configured"
+    return turso_execute("INSERT INTO radar_requests(kind, payload) VALUES(?, ?)", [kind, payload])
+
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"')\]]+")
+
+
+def _forwarded_post(msg):
+    """Return (text, urls) if `msg` is a forwarded channel post with text or caption, else None.
+    Hidden links (`text_link` entities) count too: channel posts often hide the real link behind a word."""
+    if not (msg.get("forward_origin") or msg.get("forward_from_chat") or msg.get("forward_date")):
+        return None
+    text = (msg.get("text") or msg.get("caption") or "").strip()
+    if not text:
+        return None
+    entities = msg.get("entities") or msg.get("caption_entities") or []
+    urls = [e["url"] for e in entities if e.get("type") == "text_link" and e.get("url")] + _URL_IN_TEXT.findall(text)
+    return text, list(dict.fromkeys(urls))
+
+
+def _handle_forwarded_post(msg):
+    """Forwarded post from the owner's chat -> opportunity request. True when handled (so no library search runs)."""
+    post = _forwarded_post(msg)
+    if post is None or str(msg["chat"]["id"]) != str(TELEGRAM_CHAT_ID):
+        return False
+    ok, err = enqueue_opportunity_request(*post)
+    tg_send("📌 Opportunità ricevuta: la leggo, la censisco e la tengo d'occhio." if ok else _HOUSE_ERROR_TEXT[err])
+    return True
+
+
 _HOUSE_ERROR_TEXT = {
     "not_configured": "⚙️ Il motore dei contatti non è collegato a HAL (mancano TURSO_DATABASE_URL e TURSO_AUTH_TOKEN).",
     "unauthorized": "🔑 Il database dei contatti ha rifiutato il token di HAL (TURSO_AUTH_TOKEN errato).",
@@ -7109,6 +7158,40 @@ def _cmd_casa(arg, state, excludes):
     film = "Non fa ridere (distribuzione)" if project == "non-fa-ridere" else "Walkie Talkie (produzione)"
     tg_send(f"🏠 Ricevuto: cerco email, Instagram e LinkedIn di {host} per {film}. "
             "Ti scrivo qui i risultati entro un minuto.")
+
+
+def _cmd_regione(arg, state, excludes):
+    region = (arg or "").strip()
+    if not region:
+        tg_send("🗺️ Scrivi la regione, ad esempio:\n/regione toscana\n/regione friuli venezia giulia")
+        return
+    ok, kind = enqueue_region_request(region[:60])
+    if not ok:
+        tg_send(_HOUSE_ERROR_TEXT.get(kind, _HOUSE_ERROR_TEXT["unavailable"]))
+        return
+    tg_send(f"🗺️ Chiedo al motore le case di {html.escape(region[:60])}. Ti rispondo qui entro un minuto.")
+
+
+def _cmd_bandi(arg, state, excludes):
+    ok, kind = enqueue_radar_request("calls_calendar")
+    if not ok:
+        tg_send(_HOUSE_ERROR_TEXT.get(kind, _HOUSE_ERROR_TEXT["unavailable"]))
+        return
+    tg_send("🗓️ Chiedo al motore i bandi regionali aperti e previsti. Ti rispondo qui entro un minuto.")
+
+
+def _cmd_proposta(arg, state, excludes):
+    parts = (arg or "").split()
+    if not parts or not parts[0].isdigit():
+        tg_send("🔭 Scrivi il numero della proposta, ad esempio:\n/proposta 3 (la leggi)\n/proposta 3 bozze (bozze per le case, le approvi tu)")
+        return
+    drafts = len(parts) > 1 and parts[1].lower().startswith("bozz")
+    ok, kind = enqueue_radar_request("call_proposal", f"{parts[0]} bozze" if drafts else parts[0])
+    if not ok:
+        tg_send(_HOUSE_ERROR_TEXT.get(kind, _HOUSE_ERROR_TEXT["unavailable"]))
+        return
+    tg_send(f"🔭 Proposta {parts[0]}: " + ("preparo le bozze per le case. Le trovi da approvare nell'admin." if drafts
+                                           else "te la mando qui entro un minuto."))
 
 
 # Registry — single source of truth for /aiuto and the dispatcher.
@@ -7192,6 +7275,15 @@ COMMANDS = [
     {"canonical": "/casa", "aliases": ["/house", "/company"], "handler": _cmd_casa,
      "group": "Contatti film", "args": "<sito> [produzione|distribuzione]",
      "desc": "Aggiunge una casa di produzione/distribuzione e cerca dal suo sito email, Instagram e LinkedIn"},
+    {"canonical": "/bandi", "aliases": ["/calls"], "handler": _cmd_bandi,
+     "group": "Contatti film", "args": "",
+     "desc": "Bandi regionali aperti ora e previsti nei prossimi mesi, adatti ai tuoi progetti"},
+    {"canonical": "/proposta", "aliases": ["/proposal"], "handler": _cmd_proposta,
+     "group": "Contatti film", "args": "<n> [bozze]",
+     "desc": "Legge una proposta per un bando in arrivo; con «bozze» prepara le mail alle case (da approvare)"},
+    {"canonical": "/regione", "aliases": ["/region"], "handler": _cmd_regione,
+     "group": "Contatti film", "args": "<regione>",
+     "desc": "Case di produzione note in una regione (film commission, sede, fondi regionali)"},
 
     # Help (defined last so it can introspect the others)
     {"canonical": "/aiuto", "aliases": ["/help", "/?"], "handler": None,
@@ -8005,8 +8097,12 @@ def process_callbacks(state, excludes):
             tg_answer_inline_query(iq["id"], results)
             continue
 
-        # Handle text commands
+        # Forwarded channel posts are opportunities for the radar engine, never library searches.
         msg = update.get("message")
+        if msg and _handle_forwarded_post(msg):
+            continue
+
+        # Handle text commands
         if msg and msg.get("text"):
             text = msg["text"].strip().lower()
             chat_id = str(msg["chat"]["id"])

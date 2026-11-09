@@ -141,6 +141,9 @@ Type `@<bot_username> <text>` in **any** Telegram chat (not just HAL's own) to g
 | `/coda` | `/queue`, `/q` | Show currently queued jobs |
 | `/costi` | `/costs`, `/cost` | DeepL chars + Claude polish cost + Claude fallback cost (separate sections) |
 | `/casa <site> [produzione\|distribuzione]` | `/house`, `/company` | Add a production/distribution house and look up its emails, Instagram and LinkedIn from its website. HAL only queues the request; the radar engine does the crawl and replies in the chat (needs `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`) |
+| `/regione <regione>` | `/region` | Production houses the radar knows in a region: listed by the regional film commission, seat in the region, or winners of the regional fund, the most active first. HAL only queues the request; the radar engine replies in the chat |
+| `/bandi` | `/calls` | Regional film calls open now and forecast for the next months that fit the owner's projects (radar engine replies) |
+| `/proposta <n> [bozze]` | `/proposal` | Read a lead-time proposal for an upcoming call (target houses, angle, pitch); with `bozze` the engine drafts emails to those houses, to approve in the admin |
 | `/statistiche` | `/stats`, `/analytics`, `/report` | Blog analytics report (also sent automatically every Monday; needs `BLOG_ANALYTICS_TOKEN`) |
 | `/falliti` | `/failed` | List failed videos, with a "Retry all" inline button |
 | `/esclusi` | `/excludes` | List excluded folders |
