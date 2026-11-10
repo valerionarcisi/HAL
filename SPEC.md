@@ -549,3 +549,11 @@ up within a minute, reads the site, extracts emails (with MX check), Instagram a
 people, stores the house and replies in the same chat with what it found.
 
 Failure kinds shown to the user: `not_configured`, `unauthorized`, `timeout`, `unavailable`.
+
+## `/segui` — follow a call, prize or contest
+
+`/segui <link or pasted text>` (aliases `/follow`, `/opportunita`, `/opportunity`). Same path as a forwarded channel
+post: `enqueue_opportunity_request()` queues an `opportunity` row with `{"text", "urls"}`. The links are moved out of
+the text, so a bare link arrives with an empty text and the engine reads the page itself. The engine extracts the
+opportunity, checks every field against the text, matches it to the projects, replies in the chat and watches it:
+a reminder a month before the deadline (for opportunities that fit a project), then 7 and 2 days before.

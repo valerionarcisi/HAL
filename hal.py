@@ -7156,6 +7156,24 @@ def _cmd_regione(arg, state, excludes):
     tg_send(f"🗺️ Chiedo al motore le case di {html.escape(region[:60])}. Ti rispondo qui entro un minuto.")
 
 
+def _cmd_segui(arg, state, excludes):
+    """Queue a link (or a pasted announcement) for the radar: it reads it, matches it to the projects and watches it."""
+    text = (arg or "").strip()
+    urls = list(dict.fromkeys(u.rstrip(".,;)") for u in _URL_IN_TEXT.findall(text)))
+    if not text:
+        tg_send("📌 Mandami il link di un bando, un premio o un concorso, ad esempio:\n"
+                "/segui https://www.premiosolinas.it/concorsi/\n"
+                "Puoi anche incollare il testo dell'annuncio dopo /segui.\n"
+                "Lo leggo, ti dico per quale progetto va bene e ti avviso prima della scadenza.")
+        return
+    note = _URL_IN_TEXT.sub(" ", text).strip()
+    ok, err = enqueue_opportunity_request(note, urls)
+    if not ok:
+        tg_send(_HOUSE_ERROR_TEXT.get(err, _HOUSE_ERROR_TEXT["unavailable"]))
+        return
+    tg_send("📌 Ricevuto. Lo leggo e ti rispondo qui entro un minuto: cos'è, quando scade, per quale progetto va bene.")
+
+
 def _cmd_bandi(arg, state, excludes):
     ok, kind = enqueue_radar_request("calls_calendar")
     if not ok:
@@ -7265,6 +7283,9 @@ COMMANDS = [
     {"canonical": "/proposta", "aliases": ["/proposal"], "handler": _cmd_proposta,
      "group": "Contatti film", "args": "<n> [bozze]",
      "desc": "Legge una proposta per un bando in arrivo; con «bozze» prepara le mail alle case (da approvare)"},
+    {"canonical": "/segui", "aliases": ["/follow", "/opportunita", "/opportunity"], "handler": _cmd_segui,
+     "group": "Contatti film", "args": "<link o testo>",
+     "desc": "Segue un bando, premio o concorso: lo abbina ai tuoi progetti e ti avvisa prima della scadenza"},
     {"canonical": "/regione", "aliases": ["/region"], "handler": _cmd_regione,
      "group": "Contatti film", "args": "<regione>",
      "desc": "Case di produzione note in una regione (film commission, sede, fondi regionali)"},

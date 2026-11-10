@@ -4340,6 +4340,45 @@ class TestRegioneCommand(unittest.TestCase):
         self.assertTrue(any("/regione" in s for s in sent))
 
 
+class TestSeguiCommand(unittest.TestCase):
+    def _run(self, arg, enqueue_result=(True, None)):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])), \
+             patch.object(hal, "enqueue_opportunity_request", return_value=enqueue_result) as enq:
+            hal._cmd_segui(arg, {}, [])
+        return sent, enq
+
+    def test_registry_and_aliases(self):
+        for form in ["/segui", "/follow", "/opportunita", "/opportunity"]:
+            self.assertIs(hal._find_command(form)["handler"], hal._cmd_segui)
+
+    def test_usage_without_argument(self):
+        sent, enq = self._run("")
+        enq.assert_not_called()
+        self.assertIn("/segui", sent[0])
+
+    def test_link_alone_is_queued_without_text_so_the_engine_reads_the_page(self):
+        sent, enq = self._run("https://mailchi.mp/aa1/premio-solinas?e=1")
+        enq.assert_called_once_with("", ["https://mailchi.mp/aa1/premio-solinas?e=1"])
+        self.assertIn("Ricevuto", sent[0])
+
+    def test_pasted_text_keeps_the_text_and_every_link(self):
+        _, enq = self._run("Premio X scade il 10 gennaio https://a.example/x. Info https://b.example")
+        text, urls = enq.call_args[0]
+        self.assertIn("Premio X scade il 10 gennaio", text)
+        self.assertEqual(urls, ["https://a.example/x", "https://b.example"])
+
+    def test_database_error_is_reported(self):
+        sent, _ = self._run("https://a.example", (False, "timeout"))
+        self.assertEqual(sent[0], hal._HOUSE_ERROR_TEXT["timeout"])
+
+    def test_listed_in_help(self):
+        sent = []
+        with patch.object(hal, "tg_send", side_effect=lambda *a, **k: sent.append(a[0])):
+            hal._cmd_aiuto("", {}, [])
+        self.assertTrue(any("/segui" in s for s in sent))
+
+
 class TestCasaCommand(unittest.TestCase):
     def test_registry_and_aliases(self):
         for form in ["/casa", "/house", "/company"]:
